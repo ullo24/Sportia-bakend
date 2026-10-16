@@ -1,35 +1,72 @@
+import os
 import sqlite3
 import asyncio
-from datetime import date, datetime
+import httpx
+from datetime import date, datetime, timedelta
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from sofascore_api import SofaScoreClient
 
 load_dotenv()
 
+API_KEY = os.getenv("FOOTBALL_DATA_KEY")
+if not API_KEY:
+    print("ATTENTION : FOOTBALL_DATA_KEY n'est pas definie !")
+
+BASE_URL = "https://api.football-data.org/v4"
+HEADERS = {"X-Auth-Token": API_KEY or ""}
 DB_PATH = "/tmp/sportia.db"
+
+# Competitions disponibles sur le plan gratuit
+COMPETITIONS = {
+    "PL": "Premier League",
+    "PD": "La Liga",
+    "SA": "Serie A",
+    "BL1": "Bundesliga",
+    "FL1": "Ligue 1",
+    "DED": "Eredivisie",
+    "PPL": "Primeira Liga",
+    "CL": "Champions League",
+    "EC": "European Championship",
+    "WC": "World Cup",
+}
+
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""
+    c.execute(
+        """
         CREATE TABLE IF NOT EXISTS matches (
-            id INTEGER PRIMARY KEY, league TEXT, country TEXT, home TEXT, away TEXT,
-            kickoff TEXT, status TEXT, home_goals INTEGER, away_goals INTEGER,
-            home_win REAL, draw REAL, away_win REAL, confidence REAL, updated_at TEXT
+            id INTEGER PRIMARY KEY,
+            league TEXT,
+            country TEXT,
+            home TEXT,
+            away TEXT,
+            kickoff TEXT,
+            status TEXT,
+            home_goals INTEGER,
+            away_goals INTEGER,
+            home_win REAL,
+            draw REAL,
+            away_win REAL,
+            confidence REAL,
+            updated_at TEXT
         )
-    """)
+        """
+    )
     c.execute("CREATE TABLE IF NOT EXISTS api_log (day TEXT PRIMARY KEY, count INTEGER)")
     conn.commit()
     conn.close()
+
 
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def increment_count():
     today = date.today().isoformat()
@@ -44,7 +81,8 @@ def increment_count():
     conn.commit()
     conn.close()
 
-def predict(home_rank: int, away_rank: int, home_pts: int, away_pts: int):
+
+def predict(home_rank: int = 0, away_rank: int = 0, home_pts: int = 0, away_pts: int = 0):
     if home_rank == 0 and away_rank == 0:
         return 0.40, 0.28, 0.32, 0.3
     home_strength = (1 / max(home_rank, 1)) + (home_pts / 100)
@@ -57,40 +95,65 @@ def predict(home_rank: int, away_rank: int, home_pts: int, away_pts: int):
     confidence = round(abs(hw - aw) + abs(hw - d), 2)
     return hw, d, aw, min(confidence, 1.0)
 
+
+async def fetch_competition_matches(code: str, date_from: str, date_to: str):
+    url = f"{BASE_URL}/competitions/{code}/matches"
+    params = {"dateFrom": date_from, "dateTo": date_to}
+    async with httpx.AsyncClient(timeout=20) as client:
+        try:
+            r = await client.get(url, headers=HEADERS, params=params)
+            increment_count()
+            if r.status_code != 200:
+                print(f"Erreur {code} : {r.status_code} - {r.text[:150]}")
+                return []
+            return r.json().get("matches", [])
+        except Exception as e:
+            print(f"Exception {code} : {e}")
+            return []
+
+
 async def daily_pipeline():
-    print(f"=== Pipeline pysofascore {datetime.now().isoformat()} ===")
-    today = date.today().isoformat()
-    try:
-        with SofaScoreClient() as client:
-            events = client.get_events_by_date("football", today)
-            print(f"{len(events)} matchs récupérés depuis pysofascore")
-    except Exception as e:
-        print(f"Erreur pysofascore : {e}")
+    print(f"=== Pipeline football-data.org {datetime.now().isoformat()} ===")
+    today = date.today()
+    date_from = today.isoformat()
+    date_to = (today + timedelta(days=3)).isoformat()
+
+    all_matches = []
+    for code in COMPETITIONS:
+        matches = await fetch_competition_matches(code, date_from, date_to)
+        for m in matches:
+            m["_competition_code"] = code
+        all_matches.extend(matches)
+        await asyncio.sleep(6)  # respecte la limite 10 req/min
+
+    print(f"{len(all_matches)} matchs recuperes")
+
+    if not all_matches:
         return
 
     conn = db()
     inserted = 0
-    for m in events:
+    for m in all_matches:
         try:
             match_id = m["id"]
-            league = m.get("tournament", {}).get("name", "Unknown")
-            country = m.get("tournament", {}).get("category", {}).get("name", "International")
-            home = m["homeTeam"]["name"]
-            away = m["awayTeam"]["name"]
-            kickoff_ts = m.get("startTimestamp")
-            kickoff = datetime.fromtimestamp(kickoff_ts).isoformat() if kickoff_ts else None
-            status = m.get("status", {}).get("type", "notstarted")
-            home_goals = m.get("homeScore", {}).get("current")
-            away_goals = m.get("awayScore", {}).get("current")
+            code = m.get("_competition_code", "")
+            league = COMPETITIONS.get(code, m.get("competition", {}).get("name", "Unknown"))
+            country = m.get("area", {}).get("name", "International")
+            home = m["homeTeam"]["name"] or m["homeTeam"].get("shortName", "?")
+            away = m["awayTeam"]["name"] or m["awayTeam"].get("shortName", "?")
+            kickoff = m.get("utcDate")
+            status = m.get("status", "SCHEDULED")
+            home_goals = m.get("score", {}).get("fullTime", {}).get("home")
+            away_goals = m.get("score", {}).get("fullTime", {}).get("away")
 
-            hw, d, aw, conf = predict(0, 0, 0, 0)
-            increment_count()
+            hw, d, aw, conf = predict()
 
             conn.execute(
                 """
                 INSERT OR REPLACE INTO matches
                 (id, league, country, home, away, kickoff, status,
-                 home_goals, away_goals, home_win, draw, away_win, confidence, updated_at)
+                 home_goals, away_goals, home_win, draw, away_win,
+                 confidence, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (match_id, league, country, home, away, kickoff, status,
@@ -102,9 +165,11 @@ async def daily_pipeline():
 
     conn.commit()
     conn.close()
-    print(f"{inserted} matchs enregistrés")
+    print(f"{inserted} matchs enregistres")
+
 
 scheduler = AsyncIOScheduler()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -116,19 +181,39 @@ async def lifespan(app: FastAPI):
     yield
     scheduler.shutdown()
 
-app = FastAPI(title="SportIA Predict (pysofascore)", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+app = FastAPI(title="SportIA Predict", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/")
 def root():
-    return {"status": "ok", "app": "SportIA Predict", "source": "pysofascore"}
+    return {"status": "ok", "app": "SportIA Predict", "source": "football-data.org"}
+
 
 @app.get("/matches/{day}")
 def get_matches(day: str):
     conn = db()
-    rows = conn.execute("SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)).fetchall()
+    rows = conn.execute(
+        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC",
+        (day,),
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+@app.get("/leagues")
+def get_leagues():
+    conn = db()
+    rows = conn.execute("SELECT DISTINCT league FROM matches").fetchall()
+    conn.close()
+    return [r["league"] for r in rows]
+
 
 @app.post("/refresh")
 async def manual_refresh():
