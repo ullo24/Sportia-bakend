@@ -127,21 +127,47 @@ async def fetch_events_for_tournament(unique_tournament_id: int, day: str):
 # --- PIPELINE QUOTIDIEN ---
 async def daily_pipeline():
     print(f"=== Pipeline SofaScore {datetime.now().isoformat()} ===")
-    try:
-        matches = await fetch_today_matches()
-        print(f"{len(matches)} matchs récupérés depuis SofaScore")
-    except Exception as e:
-        print(f"Erreur récupération matchs : {e}")
+    today = date.today().isoformat()
+
+    # Étape 1 : Récupérer les tournois du jour
+    tournaments = await fetch_scheduled_tournaments(today)
+    print(f"{len(tournaments)} tournois trouvés pour {today}")
+
+    if not tournaments:
+        print("Aucun tournoi programmé pour cette date.")
         return
+
+    # Étape 2 : Récupérer les matchs de chaque tournoi
+    all_matches = []
+    for tournament in tournaments:
+        try:
+            ut_id = tournament["uniqueTournament"]["id"]
+            events = await fetch_events_for_tournament(ut_id, today)
+            # On ajoute le nom du tournoi à chaque match pour l'affichage
+            for event in events:
+                event["_tournament_name"] = tournament["name"]
+            all_matches.extend(events)
+        except (KeyError, TypeError):
+            continue  # On ignore les entrées mal formées
+
+    print(f"{len(all_matches)} matchs récupérés au total depuis SofaScore")
+    
+    # Le reste de la fonction (insertion en base de données) reste inchangé
+    # Le reste du code d'insertion existant)
 
     conn = db()
     inserted = 0
     for m in matches:
         try:
             # La structure JSON de SofaScore est différente
-            match_id = m["id"]
-            league = m["tournament"]["name"]
-            country = m["tournament"]["category"]["name"] if "category" in m["tournament"] else "International"
+            # La structure des événements est maintenant différente
+              match_id = m["id"]
+            # Le nom du tournoi est maintenant dans une clé que nous avons ajoutée
+              league = m.get("_tournament_name", "Unknown League")
+            # L'ID du tournoi est aussi utile
+            unique_tournament_id = m.get("tournament", {}).get("uniqueTournament", {}).get("id")
+            # Le pays n'est plus toujours présent, on met une valeur par défaut
+            country = "International" 
             home = m["homeTeam"]["name"]
             away = m["awayTeam"]["name"]
             
