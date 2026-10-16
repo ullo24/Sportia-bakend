@@ -1,4 +1,3 @@
-import os
 import sqlite3
 import asyncio
 from datetime import date, datetime
@@ -7,80 +6,30 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from curl_cffi import requests
-from tenacity import retry, stop_after_attempt, wait_exponential
+from sofascore_api import SofaScoreClient
 
 load_dotenv()
 
-SOFA_BASE_URL = "https://api.sofascore.com/api/v1"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.sofascore.com/",
-    "Origin": "https://www.sofascore.com",
-    "X-Requested-With": "XMLHttpRequest",
-}
-
 DB_PATH = "/tmp/sportia.db"
-MAX_REQUESTS = 95
-
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        """
+    c.execute("""
         CREATE TABLE IF NOT EXISTS matches (
-            id INTEGER PRIMARY KEY,
-            league TEXT,
-            country TEXT,
-            home TEXT,
-            away TEXT,
-            kickoff TEXT,
-            status TEXT,
-            home_goals INTEGER,
-            away_goals INTEGER,
-            home_win REAL,
-            draw REAL,
-            away_win REAL,
-            confidence REAL,
-            updated_at TEXT
+            id INTEGER PRIMARY KEY, league TEXT, country TEXT, home TEXT, away TEXT,
+            kickoff TEXT, status TEXT, home_goals INTEGER, away_goals INTEGER,
+            home_win REAL, draw REAL, away_win REAL, confidence REAL, updated_at TEXT
         )
-        """
-    )
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS api_log (
-            day TEXT PRIMARY KEY,
-            count INTEGER
-        )
-        """
-    )
+    """)
+    c.execute("CREATE TABLE IF NOT EXISTS api_log (day TEXT PRIMARY KEY, count INTEGER)")
     conn.commit()
     conn.close()
-
 
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
-
-
-def get_today_count() -> int:
-    today = date.today().isoformat()
-    conn = db()
-    row = conn.execute(
-        "SELECT count FROM api_log WHERE day=?", (today,)
-    ).fetchone()
-    conn.close()
-    return row["count"] if row else 0
-
 
 def increment_count():
     today = date.today().isoformat()
@@ -95,57 +44,6 @@ def increment_count():
     conn.commit()
     conn.close()
 
-
-def can_request() -> bool:
-    return get_today_count() < MAX_REQUESTS
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-async def safe_get_sofascore(endpoint: str):
-    from playwright.async_api import async_playwright
-import asyncio
-
-_playwright_instance = None
-_browser_instance = None
-
-async def get_browser():
-    global _playwright_instance, _browser_instance
-    if _browser_instance is None:
-        _playwright_instance = await async_playwright().start()
-        _browser_instance = await _playwright_instance.chromium.launch(headless=True)
-    return _browser_instance
-
-async def safe_get_sofascore(endpoint: str):
-    if not can_request():
-        raise HTTPException(429, "Quota journalier atteint")
-
-    browser = await get_browser()
-    context = await browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-    )
-    page = await context.new_page()
-
-    url = f"{SOFA_BASE_URL}{endpoint}"
-    await page.goto(url, wait_until="networkidle")
-
-    # Récupérer le JSON depuis la page
-    content = await page.content()
-    await context.close()
-
-    # Extraire le JSON de la page (SofaScore retourne du JSON brut)
-    import json
-    try:
-        # Chercher le JSON dans la page
-        json_start = content.find("{")
-        json_end = content.rfind("}") + 1
-        data = json.loads(content[json_start:json_end])
-    except Exception as e:
-        raise Exception(f"Erreur parsing JSON: {e}")
-
-    increment_count()
-    return data
-
-
 def predict(home_rank: int, away_rank: int, home_pts: int, away_pts: int):
     if home_rank == 0 and away_rank == 0:
         return 0.40, 0.28, 0.32, 0.3
@@ -159,95 +57,44 @@ def predict(home_rank: int, away_rank: int, home_pts: int, away_pts: int):
     confidence = round(abs(hw - aw) + abs(hw - d), 2)
     return hw, d, aw, min(confidence, 1.0)
 
-
-async def fetch_scheduled_tournaments(day: str):
-    endpoint = f"/sport/football/scheduled-tournaments/{day}"
-    try:
-        data = await safe_get_sofascore(endpoint)
-        return data.get("tournaments", [])
-    except Exception as e:
-        print(f"Erreur récupération tournois : {e}")
-        return []
-
-
-async def fetch_events_for_tournament(unique_tournament_id: int, day: str):
-    endpoint = f"/unique-tournament/{unique_tournament_id}/scheduled-events/{day}"
-    try:
-        data = await safe_get_sofascore(endpoint)
-        return data.get("events", [])
-    except Exception:
-        return []
-
-
 async def daily_pipeline():
-    print(f"=== Pipeline SofaScore {datetime.now().isoformat()} ===")
+    print(f"=== Pipeline pysofascore {datetime.now().isoformat()} ===")
     today = date.today().isoformat()
-
-    tournaments = await fetch_scheduled_tournaments(today)
-    print(f"{len(tournaments)} tournois trouvés pour {today}")
-
-    if not tournaments:
-        print("Aucun tournoi programmé pour cette date.")
+    try:
+        with SofaScoreClient() as client:
+            events = client.get_events_by_date("football", today)
+            print(f"{len(events)} matchs récupérés depuis pysofascore")
+    except Exception as e:
+        print(f"Erreur pysofascore : {e}")
         return
-
-    all_matches = []
-    for tournament in tournaments:
-        try:
-            ut_id = tournament["uniqueTournament"]["id"]
-            events = await fetch_events_for_tournament(ut_id, today)
-            for event in events:
-                event["_tournament_name"] = tournament.get("name", "Unknown")
-            all_matches.extend(events)
-        except (KeyError, TypeError):
-            continue
-
-    print(f"{len(all_matches)} matchs récupérés au total")
 
     conn = db()
     inserted = 0
-    for m in all_matches:
+    for m in events:
         try:
             match_id = m["id"]
-            league = m.get("_tournament_name", "Unknown League")
-            country = "International"
+            league = m.get("tournament", {}).get("name", "Unknown")
+            country = m.get("tournament", {}).get("category", {}).get("name", "International")
             home = m["homeTeam"]["name"]
             away = m["awayTeam"]["name"]
             kickoff_ts = m.get("startTimestamp")
-            kickoff = (
-                datetime.fromtimestamp(kickoff_ts).isoformat()
-                if kickoff_ts
-                else None
-            )
+            kickoff = datetime.fromtimestamp(kickoff_ts).isoformat() if kickoff_ts else None
             status = m.get("status", {}).get("type", "notstarted")
             home_goals = m.get("homeScore", {}).get("current")
             away_goals = m.get("awayScore", {}).get("current")
 
             hw, d, aw, conf = predict(0, 0, 0, 0)
+            increment_count()
 
             conn.execute(
                 """
                 INSERT OR REPLACE INTO matches
                 (id, league, country, home, away, kickoff, status,
-                 home_goals, away_goals, home_win, draw, away_win,
-                 confidence, updated_at)
+                 home_goals, away_goals, home_win, draw, away_win, confidence, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    match_id,
-                    league,
-                    country,
-                    home,
-                    away,
-                    kickoff,
-                    status,
-                    home_goals,
-                    away_goals,
-                    hw,
-                    d,
-                    aw,
-                    conf,
-                    datetime.now().isoformat(),
-                ),
+                (match_id, league, country, home, away, kickoff, status,
+                 home_goals, away_goals, hw, d, aw, conf, datetime.now().isoformat()),
             )
             inserted += 1
         except Exception as e:
@@ -257,10 +104,7 @@ async def daily_pipeline():
     conn.close()
     print(f"{inserted} matchs enregistrés")
 
-
 scheduler = AsyncIOScheduler()
-
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -270,49 +114,21 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     asyncio.create_task(daily_pipeline())
     yield
-    # Fermer le navigateur à l'arrêt
-    global _browser_instance, _playwright_instance
-    if _browser_instance:
-        await _browser_instance.close()
-    if _playwright_instance:
-        await _playwright_instance.stop()
     scheduler.shutdown()
 
-
-app = FastAPI(title="SportIA Predict (SofaScore)", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+app = FastAPI(title="SportIA Predict (pysofascore)", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/")
 def root():
-    return {"status": "ok", "app": "SportIA Predict", "source": "SofaScore"}
-
-
-@app.get("/quota")
-def quota():
-    used = get_today_count()
-    return {"used": used, "max": MAX_REQUESTS, "remaining": MAX_REQUESTS - used}
-
+    return {"status": "ok", "app": "SportIA Predict", "source": "pysofascore"}
 
 @app.get("/matches/{day}")
 def get_matches(day: str):
     conn = db()
-    rows = conn.execute(
-        """
-        SELECT * FROM matches WHERE date(kickoff)=?
-        ORDER BY kickoff ASC
-        """,
-        (day,),
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
-
 
 @app.post("/refresh")
 async def manual_refresh():
