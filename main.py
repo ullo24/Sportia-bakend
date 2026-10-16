@@ -33,6 +33,9 @@ COMPETITIONS = {
     "WC": "World Cup",
 }
 
+# Nombre de jours de predictions en avance
+DAYS_AHEAD = 7
+
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -82,12 +85,26 @@ def increment_count():
     conn.close()
 
 
+def get_today_count() -> int:
+    today = date.today().isoformat()
+    conn = db()
+    row = conn.execute("SELECT count FROM api_log WHERE day=?", (today,)).fetchone()
+    conn.close()
+    return row["count"] if row else 0
+
+
 def predict(home_rank: int = 0, away_rank: int = 0, home_pts: int = 0, away_pts: int = 0):
+    """
+    Modele IA simple base sur le classement et les points.
+    A remplacer plus tard par un vrai modele XGBoost.
+    """
     if home_rank == 0 and away_rank == 0:
         return 0.40, 0.28, 0.32, 0.3
+
     home_strength = (1 / max(home_rank, 1)) + (home_pts / 100)
     away_strength = (1 / max(away_rank, 1)) + (away_pts / 100)
-    home_strength *= 1.15
+    home_strength *= 1.15  # avantage domicile
+
     total = home_strength + away_strength + 0.30
     hw = round(home_strength / total, 3)
     d = round(0.30 / total, 3)
@@ -97,6 +114,7 @@ def predict(home_rank: int = 0, away_rank: int = 0, home_pts: int = 0, away_pts:
 
 
 async def fetch_competition_matches(code: str, date_from: str, date_to: str):
+    """Recupere les matchs d'une competition sur une plage de dates."""
     url = f"{BASE_URL}/competitions/{code}/matches"
     params = {"dateFrom": date_from, "dateTo": date_to}
     async with httpx.AsyncClient(timeout=20) as client:
@@ -116,7 +134,7 @@ async def daily_pipeline():
     print(f"=== Pipeline football-data.org {datetime.now().isoformat()} ===")
     today = date.today()
     date_from = today.isoformat()
-    date_to = (today + timedelta(days=3)).isoformat()
+    date_to = (today + timedelta(days=DAYS_AHEAD)).isoformat()
 
     all_matches = []
     for code in COMPETITIONS:
@@ -126,7 +144,7 @@ async def daily_pipeline():
         all_matches.extend(matches)
         await asyncio.sleep(6)  # respecte la limite 10 req/min
 
-    print(f"{len(all_matches)} matchs recuperes")
+    print(f"{len(all_matches)} matchs recuperes sur {DAYS_AHEAD} jours")
 
     if not all_matches:
         return
@@ -165,7 +183,7 @@ async def daily_pipeline():
 
     conn.commit()
     conn.close()
-    print(f"{inserted} matchs enregistres")
+    print(f"{inserted} matchs enregistres sur {DAYS_AHEAD} jours")
 
 
 scheduler = AsyncIOScheduler()
@@ -196,8 +214,15 @@ def root():
     return {"status": "ok", "app": "SportIA Predict", "source": "football-data.org"}
 
 
+@app.get("/quota")
+def quota():
+    used = get_today_count()
+    return {"used": used, "remaining_today": max(0, 95 - used)}
+
+
 @app.get("/matches/{day}")
 def get_matches(day: str):
+    """Matchs d'un jour precis (format YYYY-MM-DD)."""
     conn = db()
     rows = conn.execute(
         "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC",
@@ -207,15 +232,68 @@ def get_matches(day: str):
     return [dict(r) for r in rows]
 
 
+@app.get("/matches-week")
+def matches_week():
+    """Tous les matchs des 7 prochains jours."""
+    today = date.today()
+    week_later = (today + timedelta(days=DAYS_AHEAD)).isoformat()
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT * FROM matches
+        WHERE date(kickoff) BETWEEN ? AND ?
+        ORDER BY kickoff ASC
+        """,
+        (today.isoformat(), week_later),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.get("/matches/{day}/top")
+def top_matches(day: str, limit: int = 20):
+    """Top N predictions du jour triees par confiance."""
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT * FROM matches
+        WHERE date(kickoff)=? AND confidence IS NOT NULL
+        ORDER BY confidence DESC
+        LIMIT ?
+        """,
+        (day, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 @app.get("/leagues")
 def get_leagues():
+    """Liste des championnats presents dans la base."""
     conn = db()
     rows = conn.execute("SELECT DISTINCT league FROM matches").fetchall()
     conn.close()
     return [r["league"] for r in rows]
 
 
+@app.get("/leagues/{league_name}/matches")
+def matches_by_league(league_name: str):
+    """Tous les matchs d'un championnat (7 jours)."""
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT * FROM matches
+        WHERE LOWER(league) = LOWER(?)
+        ORDER BY kickoff ASC
+        """,
+        (league_name,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 @app.post("/refresh")
 async def manual_refresh():
+    """Declenche un refresh manuel du pipeline."""
     await daily_pipeline()
-    return {"status": "refreshed"}
+    return {"status": "refreshed", "days_ahead": DAYS_AHEAD}
