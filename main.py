@@ -104,13 +104,25 @@ def predict(home_rank: int, away_rank: int, home_pts: int, away_pts: int):
     return hw, d, aw, min(confidence, 1.0)
 
 # --- RÉCUPÉRATION DES DONNÉES SOFASCORE ---
-async def fetch_today_matches():
-    """Récupère les matchs du jour via l'endpoint scheduled-events."""
-    today = date.today().isoformat()
-    # Endpoint SofaScore pour les matchs programmés par date
-    endpoint = f"/sport/football/scheduled-events/{today}"
-    data = await safe_get_sofascore(endpoint)
-    return data.get("events", [])
+async def fetch_scheduled_tournaments(day: str):
+    """Récupère la liste des tournois programmés pour une date."""
+    endpoint = f"/sport/football/scheduled-tournaments/{day}"
+    try:
+        data = await safe_get_sofascore(endpoint)
+        return data.get("tournaments", [])
+    except Exception as e:
+        print(f"Erreur récupération tournois : {e}")
+        return []
+
+async def fetch_events_for_tournament(unique_tournament_id: int, day: str):
+    """Récupère les matchs d'un tournoi spécifique pour une date."""
+    endpoint = f"/unique-tournament/{unique_tournament_id}/scheduled-events/{day}"
+    try:
+        data = await safe_get_sofascore(endpoint)
+        return data.get("events", [])
+    except Exception as e:
+        # On ignore silencieusement les tournois qui n'ont pas de matchs
+        return []
 
 # --- PIPELINE QUOTIDIEN ---
 async def daily_pipeline():
