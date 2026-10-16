@@ -102,16 +102,48 @@ def can_request() -> bool:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 async def safe_get_sofascore(endpoint: str):
+    from playwright.async_api import async_playwright
+import asyncio
+
+_playwright_instance = None
+_browser_instance = None
+
+async def get_browser():
+    global _playwright_instance, _browser_instance
+    if _browser_instance is None:
+        _playwright_instance = await async_playwright().start()
+        _browser_instance = await _playwright_instance.chromium.launch(headless=True)
+    return _browser_instance
+
+async def safe_get_sofascore(endpoint: str):
     if not can_request():
         raise HTTPException(429, "Quota journalier atteint")
+
+    browser = await get_browser()
+    context = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    )
+    page = await context.new_page()
+
     url = f"{SOFA_BASE_URL}{endpoint}"
-    response = requests.get(url, headers=HEADERS, impersonate="chrome110")
-    if response.status_code == 403:
-        raise Exception("Blocage Cloudflare (403)")
-    if response.status_code != 200:
-        raise Exception(f"Erreur SofaScore {response.status_code}")
+    await page.goto(url, wait_until="networkidle")
+
+    # Récupérer le JSON depuis la page
+    content = await page.content()
+    await context.close()
+
+    # Extraire le JSON de la page (SofaScore retourne du JSON brut)
+    import json
+    try:
+        # Chercher le JSON dans la page
+        json_start = content.find("{")
+        json_end = content.rfind("}") + 1
+        data = json.loads(content[json_start:json_end])
+    except Exception as e:
+        raise Exception(f"Erreur parsing JSON: {e}")
+
     increment_count()
-    return response.json()
+    return data
 
 
 def predict(home_rank: int, away_rank: int, home_pts: int, away_pts: int):
@@ -229,6 +261,7 @@ async def daily_pipeline():
 scheduler = AsyncIOScheduler()
 
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -237,6 +270,12 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     asyncio.create_task(daily_pipeline())
     yield
+    # Fermer le navigateur à l'arrêt
+    global _browser_instance, _playwright_instance
+    if _browser_instance:
+        await _browser_instance.close()
+    if _playwright_instance:
+        await _playwright_instance.stop()
     scheduler.shutdown()
 
 
