@@ -27,21 +27,20 @@ COMPETITIONS = {
     "EC": "European Championship", "WC": "World Cup",
 }
 
-# Buts moyens par match selon la competition (stats historiques)
 LEAGUE_AVG_GOALS = {
     "PL": 2.85, "PD": 2.65, "SA": 2.75, "BL1": 3.15, "FL1": 2.70,
     "DED": 3.20, "PPL": 2.55, "CL": 2.80, "EC": 2.60, "WC": 2.70,
 }
 
 DAYS_AHEAD = 7
-HOME_ADVANTAGE = 1.18  # +18% de buts pour le domicile
+HOME_ADVANTAGE = 1.18
 FREE_MATCHES_PER_DAY = 2
 
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("DROP TABLE IF EXISTS matches")  # migration propre
+    c.execute("DROP TABLE IF EXISTS matches")
     c.execute("""
         CREATE TABLE matches (
             id INTEGER PRIMARY KEY,
@@ -94,15 +93,11 @@ def get_today_count() -> int:
     return row["count"] if row else 0
 
 
-# ===== MOTEUR DE PREDICTION (Distribution de Poisson) =====
-
 def poisson_prob(k: int, lam: float) -> float:
-    """P(exactement k buts) avec lambda = moyenne attendue."""
     return (lam ** k) * math.exp(-lam) / math.factorial(k)
 
 
 def calc_expected_goals(league_code: str):
-    """Calcule les buts attendus (xG) pour chaque equipe."""
     base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
     home_xg = (base / 2.0) * HOME_ADVANTAGE
     away_xg = base / 2.0
@@ -110,10 +105,7 @@ def calc_expected_goals(league_code: str):
 
 
 def predict_all_markets(home_xg: float, away_xg: float) -> dict:
-    """Calcule toutes les probabilites de marches via Poisson."""
     MAX_GOALS = 10
-
-    # Matrice des scores P(home=h) * P(away=a)
     score_probs = {}
     for h in range(MAX_GOALS + 1):
         p_h = poisson_prob(h, home_xg)
@@ -121,18 +113,16 @@ def predict_all_markets(home_xg: float, away_xg: float) -> dict:
             p_a = poisson_prob(a, away_xg)
             score_probs[(h, a)] = p_h * p_a
 
-    # 1X2
     home_win = sum(p for (h, a), p in score_probs.items() if h > a)
     draw = sum(p for (h, a), p in score_probs.items() if h == a)
     away_win = sum(p for (h, a), p in score_probs.items() if h < a)
 
-    # Distribution des totaux de buts
     total_dist = {}
     for (h, a), p in score_probs.items():
         t = h + a
         total_dist[t] = total_dist.get(t, 0) + p
 
-    def over(line: float) -> float:
+    def over(line):
         return sum(p for t, p in total_dist.items() if t > line)
 
     over_15 = over(1.5)
@@ -144,21 +134,17 @@ def predict_all_markets(home_xg: float, away_xg: float) -> dict:
     over_45 = over(4.5)
     under_45 = 1 - over_45
 
-    # BTTS
     p_home_scores = 1 - poisson_prob(0, home_xg)
     p_away_scores = 1 - poisson_prob(0, away_xg)
     btts_yes = p_home_scores * p_away_scores
     btts_no = 1 - btts_yes
 
-    # But en 1ere mi-temps (~45% des buts y arrivent)
     total_xg = home_xg + away_xg
     first_half_goal = 1 - math.exp(-0.45 * total_xg)
 
-    # Handicap : equipe gagne par 2 buts ou plus
     handicap_home_1 = sum(p for (h, a), p in score_probs.items() if h - a >= 2)
     handicap_away_1 = sum(p for (h, a), p in score_probs.items() if a - h >= 2)
 
-    # Confiance : ecart entre la meilleure proba et 33% (hasard)
     main_probs = [home_win, draw, away_win, over_15, over_25, btts_yes]
     best = max(main_probs)
     confidence = max(0.0, min(1.0, (best - 0.33) / 0.67))
@@ -187,14 +173,13 @@ def predict_all_markets(home_xg: float, away_xg: float) -> dict:
     }
 
 
-# ===== ANALYSE TEXTUELLE =====
-
 def generate_analysis(match: dict) -> str:
-    """Genere une analyse courte lisible."""
     home = match["home"]
     away = match["away"]
     league = match["league"]
-    hw, d, aw = match["home_win"], match["draw"], match["away_win"]
+    hw = match["home_win"]
+    d = match["draw"]
+    aw = match["away_win"]
     over_15 = match["over_15"]
     over_25 = match["over_25"]
     under_35 = match["under_35"]
@@ -217,38 +202,36 @@ def generate_analysis(match: dict) -> str:
     best_name, best_prob = max(markets.items(), key=lambda x: x[1])
 
     lines = [
-        f"{home} vs {away} ({league})",
+        home + " vs " + away + " (" + league + ")",
         "",
-        f"Buts attendus : {total_xg:.1f} (dom {hxg:.1f} - ext {axg:.1f})",
-        f"1X2 : {hw*100:.0f}% / {d*100:.0f}% / {aw*100:.0f}%",
-        f"Total : +1.5 {over_15*100:.0f}% | +2.5 {over_25*100:.0f}% | -3.5 {under_35*100:.0f}%",
-        f"BTTS : {btts*100:.0f}% | But 1MT : {fh*100:.0f}%",
+        "Buts attendus : " + str(total_xg) + " (dom " + str(hxg) + " - ext " + str(axg) + ")",
+        "1X2 : " + str(round(hw * 100)) + "% / " + str(round(d * 100)) + "% / " + str(round(aw * 100)) + "%",
+        "Total : +1.5 " + str(round(over_15 * 100)) + "% | +2.5 " + str(round(over_25 * 100)) + "% | -3.5 " + str(round(under_35 * 100)) + "%",
+        "BTTS : " + str(round(btts * 100)) + "% | But 1MT : " + str(round(fh * 100)) + "%",
         "",
-        f"Pronostic recommande : {best_name} ({best_prob*100:.0f}%)",
+        "Pronostic recommande : " + best_name + " (" + str(round(best_prob * 100)) + "%)",
     ]
     return "\n".join(lines)
 
 
-# ===== RECUPERATION DES MATCHS =====
-
 async def fetch_competition_matches(code: str, date_from: str, date_to: str):
-    url = f"{BASE_URL}/competitions/{code}/matches"
+    url = BASE_URL + "/competitions/" + code + "/matches"
     params = {"dateFrom": date_from, "dateTo": date_to}
     async with httpx.AsyncClient(timeout=20) as client:
         try:
             r = await client.get(url, headers=HEADERS, params=params)
             increment_count()
             if r.status_code != 200:
-                print(f"Erreur {code} : {r.status_code}")
+                print("Erreur " + code + " : " + str(r.status_code))
                 return []
             return r.json().get("matches", [])
         except Exception as e:
-            print(f"Exception {code} : {e}")
+            print("Exception " + code + " : " + str(e))
             return []
 
 
 async def daily_pipeline():
-    print(f"=== Pipeline {datetime.now().isoformat()} ===")
+    print("=== Pipeline " + datetime.now().isoformat() + " ===")
     today = date.today()
     date_from = today.isoformat()
     date_to = (today + timedelta(days=DAYS_AHEAD)).isoformat()
@@ -261,7 +244,7 @@ async def daily_pipeline():
         all_matches.extend(matches)
         await asyncio.sleep(6)
 
-    print(f"{len(all_matches)} matchs recuperes")
+    print(str(len(all_matches)) + " matchs recuperes")
 
     if not all_matches:
         return
@@ -284,7 +267,8 @@ async def daily_pipeline():
             home_xg, away_xg = calc_expected_goals(code)
             pred = predict_all_markets(home_xg, away_xg)
 
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT OR REPLACE INTO matches
                 (id, league, country, home, away, kickoff, status,
                  home_goals, away_goals,
@@ -296,55 +280,52 @@ async def daily_pipeline():
                  home_xg, away_xg, total_xg,
                  confidence, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                match_id, league, country, home, away, kickoff, status,
-                home_goals, away_goals,
-                pred["home_win"], pred["draw"], pred["away_win"],
-                pred["over_15"], pred["under_15"],
-                pred["over_25"], pred["under_25"],
-                pred["over_35"], pred["under_35"],
-                pred["over_45"], pred["under_45"],
-                pred["btts_yes"], pred["btts_no"],
-                pred["first_half_goal"],
-                pred["handicap_home_1"], pred["handicap_away_1"],
-                pred["home_xg"], pred["away_xg"], pred["total_xg"],
-                pred["confidence"],
-                datetime.now().isoformat(),
-            ))
+                """,
+                (
+                    match_id, league, country, home, away, kickoff, status,
+                    home_goals, away_goals,
+                    pred["home_win"], pred["draw"], pred["away_win"],
+                    pred["over_15"], pred["under_15"],
+                    pred["over_25"], pred["under_25"],
+                    pred["over_35"], pred["under_35"],
+                    pred["over_45"], pred["under_45"],
+                    pred["btts_yes"], pred["btts_no"],
+                    pred["first_half_goal"],
+                    pred["handicap_home_1"], pred["handicap_away_1"],
+                    pred["home_xg"], pred["away_xg"], pred["total_xg"],
+                    pred["confidence"],
+                    datetime.now().isoformat(),
+                ),
+            )
             inserted += 1
         except Exception as e:
-            print(f"Erreur match {m.get('id')}: {e}")
+            print("Erreur match " + str(m.get("id")) + ": " + str(e))
 
     conn.commit()
     conn.close()
-    print(f"{inserted} matchs enregistres")
+    print(str(inserted) + " matchs enregistres")
 
     mark_free_access()
 
 
 def mark_free_access():
-    """Marque les 2 meilleurs matchs du jour comme gratuits."""
     today = date.today().isoformat()
     conn = db()
     conn.execute(
         "UPDATE matches SET free_access = 0 WHERE date(kickoff) = ?",
         (today,),
     )
-    conn.execute("""
-        UPDATE matches SET free_access = 1
-        WHERE id IN (
-            SELECT id FROM matches
-            WHERE date(kickoff) = ? AND confidence IS NOT NULL
-            ORDER BY confidence DESC
-            LIMIT ?
-        )
-    """, (today, FREE_MATCHES_PER_DAY))
+    conn.execute(
+        "UPDATE matches SET free_access = 1 WHERE id IN ("
+        "SELECT id FROM matches WHERE date(kickoff) = ? "
+        "AND confidence IS NOT NULL "
+        "ORDER BY confidence DESC LIMIT ?)",
+        (today, FREE_MATCHES_PER_DAY),
+    )
     conn.commit()
     conn.close()
-    print(f"Top {FREE_MATCHES_PER_DAY} matchs marques comme gratuits")
+    print("Top " + str(FREE_MATCHES_PER_DAY) + " matchs marques comme gratuits")
 
-
-# ===== APP FASTAPI =====
 
 scheduler = AsyncIOScheduler()
 
@@ -372,13 +353,12 @@ app.add_middleware(
 @app.get("/")
 def root():
     return {"status": "ok", "app": "SportIA Predict", "version": "2.0"}
-    @app.get("/")
-def root():
-    return {"status": "ok", "app": "SportIA Predict", "version": "2.0"}
+
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "ok"}
+
 
 @app.get("/quota")
 def quota():
@@ -388,7 +368,6 @@ def quota():
 
 @app.get("/matches/{day}")
 def get_matches(day: str):
-    """Tous les matchs d'un jour avec tous les marches."""
     conn = db()
     rows = conn.execute(
         "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC",
@@ -400,7 +379,6 @@ def get_matches(day: str):
 
 @app.get("/matches-week")
 def matches_week():
-    """Tous les matchs sur 7 jours."""
     today = date.today()
     week_later = (today + timedelta(days=DAYS_AHEAD)).isoformat()
     conn = db()
@@ -414,7 +392,6 @@ def matches_week():
 
 @app.get("/predictions/{day}/free")
 def get_free_predictions(day: str):
-    """2 matchs gratuits du jour avec analyse."""
     conn = db()
     rows = conn.execute(
         "SELECT * FROM matches WHERE date(kickoff)=? AND free_access=1 "
@@ -432,7 +409,6 @@ def get_free_predictions(day: str):
 
 @app.get("/predictions/{day}/premium")
 def get_premium_predictions(day: str):
-    """Tous les matchs du jour avec analyse (premium)."""
     conn = db()
     rows = conn.execute(
         "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY confidence DESC",
@@ -449,7 +425,6 @@ def get_premium_predictions(day: str):
 
 @app.get("/matches/{match_id}/detail")
 def match_detail(match_id: int):
-    """Detail complet d'un match avec analyse."""
     conn = db()
     row = conn.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
     conn.close()
