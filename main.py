@@ -308,6 +308,22 @@ async def daily_pipeline():
     mark_free_access()
 
 
+import httpx
+
+async def get_team_logo(team_name: str) -> str | None:
+    url = f"https://www.thesportsdb.com/api/v1/json/3/searchteams.php?t={team_name}"
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(url)
+            data = r.json()
+            # L'API renvoie une liste "teams". On prend le premier résultat.
+            if data.get("teams"):
+                return data["teams"][0].get("strTeamBadge")
+        except Exception:
+            pass
+    return None
+
+
 def mark_free_access():
     today = date.today().isoformat()
     conn = db()
