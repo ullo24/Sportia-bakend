@@ -107,10 +107,54 @@ async def get_team_logo(team_data: dict) -> str:
     # 1. Priorite : le crest fourni par football-data.org
     crest = team_data.get("crest")
     if crest:
-    if not crest.endswith('.svg'):
-        crest = crest.rsplit('.', 1)[0] + '.svg'
+        # Force l'extension .svg (le format officiel de football-data.org)
+        if not crest.endswith('.svg'):
+            crest = crest.rsplit('.', 1)[0] + '.svg'
         return crest
 
+    # 2. Fallback TheSportsDB (avec gestion d'erreur)
+    team_name = team_data.get("name") or team_data.get("shortName", "")
+    if not team_name:
+        return ""
+
+    # Verifie le cache
+    conn = db()
+    row = conn.execute(
+        "SELECT logo FROM team_logos WHERE team=?", (team_name,)
+    ).fetchone()
+    conn.close()
+    if row and row["logo"]:
+        return row["logo"]
+
+    # Appel TheSportsDB protege
+    url = "https://www.thesportsdb.com/api/v1/json/3/searchteams.php"
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(url, params={"t": team_name})
+            content_type = r.headers.get("content-type", "")
+            if "application/json" not in content_type:
+                print("TSDB non-JSON pour " + team_name)
+                return ""
+            data = r.json()
+            teams = data.get("teams")
+            if teams:
+                for t in teams:
+                    if t.get("strTeam", "").lower() == team_name.lower():
+                        logo = t.get("strTeamBadge") or t.get("strTeamLogo")
+                        if logo:
+                            conn = db()
+                            conn.execute(
+                                "INSERT OR REPLACE INTO team_logos (team, logo) VALUES (?, ?)",
+                                (team_name, logo),
+                            )
+                            conn.commit()
+                            conn.close()
+                            return logo
+    except Exception as e:
+        print("Erreur logo " + team_name + ": " + str(e))
+
+    return ""
+    
     # 2. Fallback TheSportsDB (avec gestion d'erreur)
     team_name = team_data.get("name") or team_data.get("shortName", "")
     if not team_name:
