@@ -107,6 +107,8 @@ async def get_team_logo(team_data: dict) -> str:
     # 1. Priorite : le crest fourni par football-data.org
     crest = team_data.get("crest")
     if crest:
+    if not crest.endswith('.svg'):
+        crest = crest.rsplit('.', 1)[0] + '.svg'
         return crest
 
     # 2. Fallback TheSportsDB (avec gestion d'erreur)
