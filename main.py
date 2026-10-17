@@ -99,12 +99,22 @@ def get_today_count() -> int:
 
 # ===== LOGOS DES EQUIPES (TheSportsDB) =====
 
-async def get_team_logo(team_name: str) -> str:
+async def get_team_logo(team_data: dict) -> str:
     """
-    Retourne l'URL du logo d'une equipe.
-    Utilise un cache en base pour eviter les appels repetes.
+    Recupere le logo depuis football-data.org (champ 'crest').
+    Fallback sur TheSportsDB si absent.
     """
-    # 1. Verifie le cache
+    # 1. Priorite : le crest fourni par football-data.org
+    crest = team_data.get("crest")
+    if crest:
+        return crest
+
+    # 2. Fallback TheSportsDB (avec gestion d'erreur)
+    team_name = team_data.get("name") or team_data.get("shortName", "")
+    if not team_name:
+        return ""
+
+    # Verifie le cache
     conn = db()
     row = conn.execute(
         "SELECT logo FROM team_logos WHERE team=?", (team_name,)
@@ -113,20 +123,23 @@ async def get_team_logo(team_name: str) -> str:
     if row and row["logo"]:
         return row["logo"]
 
-    # 2. Sinon appelle TheSportsDB
-    url = f"https://www.thesportsdb.com/api/v1/json/3/searchteams.php"
+    # Appel TheSportsDB protege
+    url = "https://www.thesportsdb.com/api/v1/json/3/searchteams.php"
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=8) as client:
             r = await client.get(url, params={"t": team_name})
+            # Verifie que c'est bien du JSON
+            content_type = r.headers.get("content-type", "")
+            if "application/json" not in content_type:
+                print(f"TSDB non-JSON pour {team_name} (probable rate limit)")
+                return ""
             data = r.json()
             teams = data.get("teams")
             if teams:
-                # Cherche le meilleur match (nom exact)
                 for t in teams:
                     if t.get("strTeam", "").lower() == team_name.lower():
                         logo = t.get("strTeamBadge") or t.get("strTeamLogo")
                         if logo:
-                            # Stocke en cache
                             conn = db()
                             conn.execute(
                                 "INSERT OR REPLACE INTO team_logos (team, logo) VALUES (?, ?)",
@@ -139,7 +152,6 @@ async def get_team_logo(team_name: str) -> str:
         print(f"Erreur logo {team_name}: {e}")
 
     return ""
-
 
 # ===== MOTEUR DE PREDICTION (Poisson) =====
 
@@ -299,24 +311,30 @@ async def daily_pipeline():
     if not all_matches:
         return
 
-    # Etape A : recupere tous les logos (avec cache)
+        # Etape A : recupere les logos (crest football-data.org prioritaire)
     print("Recuperation des logos...")
-    unique_teams = set()
+    logos = {}
     for m in all_matches:
         try:
-            home = m["homeTeam"]["name"] or m["homeTeam"].get("shortName", "?")
-            away = m["awayTeam"]["name"] or m["awayTeam"].get("shortName", "?")
-            unique_teams.add(home)
-            unique_teams.add(away)
+            home_team = m["homeTeam"]
+            away_team = m["awayTeam"]
+            home_name = home_team.get("name") or home_team.get("shortName", "?")
+            away_name = away_team.get("name") or away_team.get("shortName", "?")
+
+            if home_name not in logos:
+                logos[home_name] = await get_team_logo(home_team)
+            if away_name not in logos:
+                logos[away_name] = await get_team_logo(away_team)
+
+            # Pause uniquement si on a du appeler TheSportsDB (fallback)
+            # On ne peut pas le savoir facilement, donc on garde une pause courte
+            await asyncio.sleep(0.5)
         except (KeyError, TypeError):
             continue
 
-    logos = {}
-    for team in unique_teams:
-        logos[team] = await get_team_logo(team)
-        await asyncio.sleep(2)  # respecte la limite TheSportsDB (30 req/min)
-    print(str(len(logos)) + " logos recuperes")
+    print(f"{len(logos)} logos recuperes") 
 
+    
     # Etape B : insere les matchs en base
     conn = db()
     inserted = 0
