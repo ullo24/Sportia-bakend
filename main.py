@@ -372,7 +372,9 @@ app.add_middleware(
 @app.get("/")
 def root():
     return {"status": "ok", "app": "SportIA Predict", "version": "2.0"}
-
+    @app.get("/")
+def root():
+    return {"status": "ok", "app": "SportIA Predict", "version": "2.0"}
 
 @app.get("/quota")
 def quota():
