@@ -376,6 +376,10 @@ def root():
 def root():
     return {"status": "ok", "app": "SportIA Predict", "version": "2.0"}
 
+@app.api_route("/health", methods=["GET", "HEAD"])
+def health_check():
+    return {"status": "ok"}
+
 @app.get("/quota")
 def quota():
     used = get_today_count()
