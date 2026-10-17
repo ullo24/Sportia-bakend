@@ -37,6 +37,8 @@ HOME_ADVANTAGE = 1.18
 FREE_MATCHES_PER_DAY = 2
 
 
+# ===== BASE DE DONNEES =====
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -46,6 +48,7 @@ def init_db():
             id INTEGER PRIMARY KEY,
             league TEXT, country TEXT,
             home TEXT, away TEXT,
+            home_logo TEXT, away_logo TEXT,
             kickoff TEXT, status TEXT,
             home_goals INTEGER, away_goals INTEGER,
             home_win REAL, draw REAL, away_win REAL,
@@ -63,6 +66,7 @@ def init_db():
         )
     """)
     c.execute("CREATE TABLE IF NOT EXISTS api_log (day TEXT PRIMARY KEY, count INTEGER)")
+    c.execute("CREATE TABLE IF NOT EXISTS team_logos (team TEXT PRIMARY KEY, logo TEXT)")
     conn.commit()
     conn.close()
 
@@ -92,6 +96,52 @@ def get_today_count() -> int:
     conn.close()
     return row["count"] if row else 0
 
+
+# ===== LOGOS DES EQUIPES (TheSportsDB) =====
+
+async def get_team_logo(team_name: str) -> str:
+    """
+    Retourne l'URL du logo d'une equipe.
+    Utilise un cache en base pour eviter les appels repetes.
+    """
+    # 1. Verifie le cache
+    conn = db()
+    row = conn.execute(
+        "SELECT logo FROM team_logos WHERE team=?", (team_name,)
+    ).fetchone()
+    conn.close()
+    if row and row["logo"]:
+        return row["logo"]
+
+    # 2. Sinon appelle TheSportsDB
+    url = f"https://www.thesportsdb.com/api/v1/json/3/searchteams.php"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, params={"t": team_name})
+            data = r.json()
+            teams = data.get("teams")
+            if teams:
+                # Cherche le meilleur match (nom exact)
+                for t in teams:
+                    if t.get("strTeam", "").lower() == team_name.lower():
+                        logo = t.get("strTeamBadge") or t.get("strTeamLogo")
+                        if logo:
+                            # Stocke en cache
+                            conn = db()
+                            conn.execute(
+                                "INSERT OR REPLACE INTO team_logos (team, logo) VALUES (?, ?)",
+                                (team_name, logo),
+                            )
+                            conn.commit()
+                            conn.close()
+                            return logo
+    except Exception as e:
+        print(f"Erreur logo {team_name}: {e}")
+
+    return ""
+
+
+# ===== MOTEUR DE PREDICTION (Poisson) =====
 
 def poisson_prob(k: int, lam: float) -> float:
     return (lam ** k) * math.exp(-lam) / math.factorial(k)
@@ -249,6 +299,25 @@ async def daily_pipeline():
     if not all_matches:
         return
 
+    # Etape A : recupere tous les logos (avec cache)
+    print("Recuperation des logos...")
+    unique_teams = set()
+    for m in all_matches:
+        try:
+            home = m["homeTeam"]["name"] or m["homeTeam"].get("shortName", "?")
+            away = m["awayTeam"]["name"] or m["awayTeam"].get("shortName", "?")
+            unique_teams.add(home)
+            unique_teams.add(away)
+        except (KeyError, TypeError):
+            continue
+
+    logos = {}
+    for team in unique_teams:
+        logos[team] = await get_team_logo(team)
+        await asyncio.sleep(2)  # respecte la limite TheSportsDB (30 req/min)
+    print(str(len(logos)) + " logos recuperes")
+
+    # Etape B : insere les matchs en base
     conn = db()
     inserted = 0
     for m in all_matches:
@@ -270,8 +339,8 @@ async def daily_pipeline():
             conn.execute(
                 """
                 INSERT OR REPLACE INTO matches
-                (id, league, country, home, away, kickoff, status,
-                 home_goals, away_goals,
+                (id, league, country, home, away, home_logo, away_logo,
+                 kickoff, status, home_goals, away_goals,
                  home_win, draw, away_win,
                  over_15, under_15, over_25, under_25,
                  over_35, under_35, over_45, under_45,
@@ -279,11 +348,12 @@ async def daily_pipeline():
                  handicap_home_1, handicap_away_1,
                  home_xg, away_xg, total_xg,
                  confidence, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    match_id, league, country, home, away, kickoff, status,
-                    home_goals, away_goals,
+                    match_id, league, country, home, away,
+                    logos.get(home, ""), logos.get(away, ""),
+                    kickoff, status, home_goals, away_goals,
                     pred["home_win"], pred["draw"], pred["away_win"],
                     pred["over_15"], pred["under_15"],
                     pred["over_25"], pred["under_25"],
@@ -308,22 +378,6 @@ async def daily_pipeline():
     mark_free_access()
 
 
-import httpx
-
-async def get_team_logo(team_name: str) -> str | None:
-    url = f"https://www.thesportsdb.com/api/v1/json/3/searchteams.php?t={team_name}"
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.get(url)
-            data = r.json()
-            # L'API renvoie une liste "teams". On prend le premier résultat.
-            if data.get("teams"):
-                return data["teams"][0].get("strTeamBadge")
-        except Exception:
-            pass
-    return None
-
-
 def mark_free_access():
     today = date.today().isoformat()
     conn = db()
@@ -342,6 +396,8 @@ def mark_free_access():
     conn.close()
     print("Top " + str(FREE_MATCHES_PER_DAY) + " matchs marques comme gratuits")
 
+
+# ===== APP FASTAPI =====
 
 scheduler = AsyncIOScheduler()
 
@@ -368,7 +424,7 @@ app.add_middleware(
 
 @app.get("/")
 def root():
-    return {"status": "ok", "app": "SportIA Predict", "version": "2.0"}
+    return {"status": "ok", "app": "SportIA Predict", "version": "2.1"}
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
