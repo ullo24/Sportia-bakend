@@ -487,6 +487,75 @@ app.add_middleware(
 
 
 @app.get("/")
+# ===== SCORES EN DIRECT (worldcup26.ir) =====
+
+LIVE_API_BASE = "https://worldcup26.ir"
+
+# Mapping des codes de compétitions football-data.org vers les slugs de l'API live
+LIVE_LEAGUE_MAP = {
+    "PL": "eng.1",   # Premier League
+    "PD": "esp.1",   # La Liga
+    # Les autres ligues ne sont pas encore couvertes par l'API live gratuite
+}
+
+async def fetch_live_scores_for_league(league_slug: str, day_str: str):
+    """
+    Recupere les scores en direct pour une ligue et une date donnee.
+    day_str au format YYYYMMDD.
+    """
+    url = f"{LIVE_API_BASE}/get/soccer/{league_slug}/scoreboard"
+    params = {"dates": day_str}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, params=params)
+            if r.status_code != 200:
+                print(f"Live API {league_slug} : {r.status_code}")
+                return []
+            data = r.json()
+            return data.get("events", [])
+    except Exception as e:
+        print(f"Erreur live {league_slug}: {e}")
+        return []
+
+
+@app.get("/live-scores/{day}")
+async def get_live_scores(day: str):
+    """
+    Retourne les scores en direct pour une date (format YYYY-MM-DD).
+    Fusionne avec les matchs de la base pour enrichir les infos.
+    """
+    # Convertit YYYY-MM-DD en YYYYMMDD pour l'API live
+    day_compact = day.replace("-", "")
+
+    live_matches = []
+    for league_code, slug in LIVE_LEAGUE_MAP.items():
+        events = await fetch_live_scores_for_league(slug, day_compact)
+        for ev in events:
+            # Extrait les infos utiles de la reponse de l'API live
+            status = ev.get("status", {})
+            status_type = status.get("type", {})
+            state = status_type.get("state", "unknown")  # pre, in, post
+            clock = status.get("displayClock") or status.get("clock") or ""
+
+            competition = ev.get("competitions", [{}])[0]
+            competitors = competition.get("competitors", [])
+            home_team = next((c for c in competitors if c.get("homeAway") == "home"), {})
+            away_team = next((c for c in competitors if c.get("homeAway") == "away"), {})
+
+            live_matches.append({
+                "live_id": ev.get("id"),
+                "league_slug": slug,
+                "league_code": league_code,
+                "home_name": home_team.get("team", {}).get("displayName", "?"),
+                "away_name": away_team.get("team", {}).get("displayName", "?"),
+                "home_score": home_team.get("score"),
+                "away_score": away_team.get("score"),
+                "status_state": state,  # pre / in / post
+                "status_detail": status_type.get("shortDetail", ""),
+                "clock": clock,
+            })
+
+    return live_matches
 def root():
     return {"status": "ok", "app": "SportIA Predict", "version": "2.1"}
 
