@@ -510,8 +510,12 @@ def get_matches(day: str):
         (day,),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
-
+    result = []
+    for r in rows:
+        m = dict(r)
+        m["analysis"] = generate_analysis(m)
+        result.append(m)
+    return result
 
 @app.get("/matches-week")
 def matches_week():
@@ -523,8 +527,12 @@ def matches_week():
         (today.isoformat(), week_later),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
-
+    result = []
+    for r in rows:
+        m = dict(r)
+        m["analysis"] = generate_analysis(m)
+        result.append(m)
+    return result
 
 @app.get("/predictions/{day}/free")
 def get_free_predictions(day: str):
