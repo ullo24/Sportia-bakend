@@ -1017,6 +1017,7 @@ async def get_live_scores(day: str, refresh: bool = False):
             print("Live " + code + ": " + str(e))
     return all_results
 
+# Force redeploy 2026-10-18 22:00
 
 @app.post("/refresh")
 async def manual_refresh():
