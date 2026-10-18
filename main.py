@@ -895,6 +895,38 @@ def _build_ticket(pool, target_cote, min_n, max_n):
             best = combo
 
     return best
+
+def _build_ticket_multi(pool, target_cote, min_n, max_n, max_per_match=2):
+    """Construit un ticket en autorisant jusqu'a max_per_match picks par match
+    (avec des marches DIFFERENTS). Utilise pour le risky."""
+    if not pool:
+        return []
+    best = []
+    best_diff = float('inf')
+    for n in range(min_n, max_n + 1):
+        avg_needed = target_cote ** (1.0 / n)
+        sorted_pool = sorted(pool, key=lambda p: abs(p["cote"] - avg_needed))
+        combo = []
+        used_markets = {}
+        for p in sorted_pool:
+            mid = p["match_id"]
+            markets = used_markets.get(mid, set())
+            if p["market"] in markets:
+                continue
+            if len(markets) >= max_per_match:
+                continue
+            combo.append(p)
+            used_markets.setdefault(mid, set()).add(p["market"])
+            if len(combo) >= n:
+                break
+        if len(combo) < n:
+            continue
+        cote = _calc_total_cote(combo)
+        diff = abs(cote - target_cote)
+        if diff < best_diff:
+            best_diff = diff
+            best = combo
+    return best
     
 def _build_ticket_2pm(pool, target_cote, min_n, max_n, max_per_match=2):
     """Fallback : autorise jusqu'a max_per_match picks par match
@@ -957,8 +989,7 @@ def get_tickets(day: str):
     # Les matchs peuvent apparaitre dans plusieurs tickets (marches differents).
     safe = _build_ticket(all_picks, 2.0, 2, 3)
     medium = _build_ticket(all_picks, 120.0, 10, 15)
-    risky = _build_ticket(all_picks, 1500.0, 13, 20)
-
+    risky = _build_ticket_multi(all_picks, 1500.0, 18, 25, max_per_match=2)
     return {
         "date": day,
         "safe": {
