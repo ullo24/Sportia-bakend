@@ -769,94 +769,180 @@ def get_leagues():
 
 @app.get("/tickets/{day}")
 def get_tickets(day: str):
-    conn = db()
-    rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)
-    ).fetchall()
-    conn.close()
+    """Genere les 3 tickets. Ne renvoie JAMAIS null."""
+    try:
+        conn = db()
+        rows = conn.execute(
+            "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)
+        ).fetchall()
+        conn.close()
 
-    if not rows:
-        return {"error": "Aucun match pour cette date"}
+        if not rows:
+            return {"error": "Aucun match pour cette date", "date": day}
 
-    all_picks = []
-    for r in rows:
-        m = dict(r)
-        all_picks.extend(_all_picks_for_match(m))
-
-    if not all_picks:
-        return {"error": "Aucun pick disponible"}
-
-    # SAFE : 2-3 picks, cible ~2
-    safe = _build_ticket(all_picks, 2.0, 2, 3)
-    safe_ids = {p["match_id"] for p in safe}
-
-    # MEDIUM : 10-15 picks, cible ~120
-    medium_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
-    medium = _build_ticket(medium_pool, 120.0, 10, 15)
-
-       # RISKY : logique specifique avec diversification des marches
-    risky_picks = []
-    used_ids = set()
-    market_count = {}  # compte les marches utilises pour diversifier
-    MAX_PER_MARKET = 3  # max 3 picks du meme marche
-
-    for r in rows:
-        m = dict(r)
-        pick = _calc_risky_pick(m)
-        if not pick:
-            continue
-        market = pick["market"]
-        # Verifie si le marche n'est pas sature
-        if market_count.get(market, 0) >= MAX_PER_MARKET:
-            continue
-        risky_picks.append(pick)
-        used_ids.add(m["id"])
-        market_count[market] = market_count.get(market, 0) + 1
-
-    # Si pas assez, complete avec picks classiques varies
-    if len(risky_picks) < 10:
+        # Collecte des picks
+        all_picks = []
         for r in rows:
             m = dict(r)
-            if m["id"] in used_ids:
-                continue
-            best_pick = None
-            best_dist = float('inf')
-            for label, prob, desc in [
-                ("+2.5", m.get("over_25"), "+2.5 buts"),
-                ("+3.5", m.get("over_35"), "+3.5 buts"),
-                ("BTTS", m.get("btts_yes"), "Les 2 equipes marquent"),
-                ("1MT", m.get("first_half_goal"), "But en 1ere MT"),
-                ("+1.5 1MT", m.get("first_half_over_15"), "+1.5 buts 1ere MT"),
-                ("-2.5", m.get("under_25"), "-2.5 buts"),
-                ("H-2 D", m.get("handicap_home_minus2"), "Handicap -2 " + m["home"]),
-                ("H-2 E", m.get("handicap_away_minus2"), "Handicap -2 " + m["away"]),
-            ]:
-                if prob and 0.35 <= prob <= 0.80:
-                    market = label
-                    if market_count.get(market, 0) >= MAX_PER_MARKET:
+            try:
+                all_picks.extend(_all_picks_for_match(m))
+            except Exception:
+                pass
+
+        if not all_picks:
+            return {"error": "Aucun pick disponible", "date": day}
+
+        # SAFE
+        try:
+            safe = _build_ticket(all_picks, 2.0, 2, 3)
+            if safe is None:
+                safe = []
+            if not isinstance(safe, list):
+                safe = []
+        except Exception:
+            safe = []
+
+        safe_ids = {p["match_id"] for p in safe}
+
+        # MEDIUM
+        try:
+            medium_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
+            medium = _build_ticket(medium_pool, 120.0, 10, 15)
+            if medium is None:
+                medium = []
+            if not isinstance(medium, list):
+                medium = []
+        except Exception:
+            medium = []
+
+        # RISKY
+        risky_list = []
+        try:
+            risky_picks = []
+            used_ids = set()
+            market_count = {}
+            MAX_PER_MARKET = 3
+
+            for r in rows:
+                m = dict(r)
+                try:
+                    pick = _calc_risky_pick(m)
+                except Exception:
+                    pick = None
+                if not pick:
+                    continue
+                mk = pick["market"]
+                if market_count.get(mk, 0) >= MAX_PER_MARKET:
+                    continue
+                risky_picks.append(pick)
+                used_ids.add(m["id"])
+                market_count[mk] = market_count.get(mk, 0) + 1
+
+            # Fallback si < 8
+            if len(risky_picks) < 8:
+                for r in rows:
+                    m = dict(r)
+                    if m["id"] in used_ids:
                         continue
-                    cote = 1.0 / prob
-                    if cote < 1.30 or cote > 3.5:
+                    best_pick = None
+                    best_dist = 999
+                    for label, prob, desc in [
+                        ("+2.5", m.get("over_25"), "+2.5 buts"),
+                        ("+3.5", m.get("over_35"), "+3.5 buts"),
+                        ("BTTS", m.get("btts_yes"), "Les 2 equipes marquent"),
+                        ("1MT", m.get("first_half_goal"), "But en 1ere MT"),
+                        ("-2.5", m.get("under_25"), "-2.5 buts"),
+                        ("+1.5 1MT", m.get("first_half_over_15"), "+1.5 1ere MT"),
+                    ]:
+                        if not prob:
+                            continue
+                        try:
+                            cote = 1.0 / prob
+                        except Exception:
+                            continue
+                        if cote < 1.30 or cote > 3.5:
+                            continue
+                        if market_count.get(label, 0) >= MAX_PER_MARKET:
+                            continue
+                        dist = abs(cote - 2.0)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_pick = {
+                                "match_id": m["id"], "home": m["home"], "away": m["away"],
+                                "league": m["league"], "kickoff": m["kickoff"],
+                                "home_logo": m["home_logo"], "away_logo": m["away_logo"],
+                                "market": label, "description": desc,
+                                "proba": round(prob, 3), "cote": round(cote, 2),
+                            }
+                    if best_pick:
+                        risky_picks.append(best_pick)
+                        used_ids.add(m["id"])
+                        mk = best_pick["market"]
+                        market_count[mk] = market_count.get(mk, 0) + 1
+
+            # Dernier fallback
+            if len(risky_picks) < 3:
+                for r in rows:
+                    m = dict(r)
+                    if m["id"] in used_ids:
                         continue
-                    dist = abs(cote - 2.0)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_pick = {
+                    prob = m.get("over_15")
+                    if prob:
+                        risky_picks.append({
                             "match_id": m["id"], "home": m["home"], "away": m["away"],
                             "league": m["league"], "kickoff": m["kickoff"],
                             "home_logo": m["home_logo"], "away_logo": m["away_logo"],
-                            "market": market, "description": desc,
-                            "proba": round(prob, 3), "cote": round(cote, 2),
-                        }
-            if best_pick:
-                risky_picks.append(best_pick)
-                used_ids.add(m["id"])
-                mk = best_pick["market"]
-                market_count[mk] = market_count.get(mk, 0) + 1
+                            "market": "+1.5", "description": "+1.5 buts",
+                            "proba": round(prob, 3), "cote": round(1.0 / prob, 2),
+                        })
+                        used_ids.add(m["id"])
 
-    # Construit le ticket en visant 1500
-    risky = _build_ticket(risky_picks, 1500.0, 8, 20)
+            # Construit
+            risky_result = _build_ticket(risky_picks, 1500.0, 3, 20)
+            if risky_result is None or not isinstance(risky_result, list):
+                risky_result = risky_picks[:15] if risky_picks else []
+            risky_list = risky_result
+        except Exception as e:
+            print(f"Erreur risky: {e}")
+            risky_list = []
 
+        # Construction finale - JAMAIS null
+        def safe_cote(lst):
+            try:
+                return _calc_total_cote(lst) if lst else 1.0
+            except Exception:
+                return 1.0
+
+        return {
+            "date": day,
+            "safe": {
+                "name": "Ticket Safe",
+                "total_cote": safe_cote(safe),
+                "count": len(safe),
+                "picks": safe,
+            },
+            "medium": {
+                "name": "Ticket Medium",
+                "total_cote": safe_cote(medium),
+                "count": len(medium),
+                "picks": medium,
+            },
+            "risky": {
+                "name": "Ticket Risky",
+                "total_cote": safe_cote(risky_list),
+                "count": len(risky_list),
+                "picks": risky_list,
+            },
+        }
+    except Exception as e:
+        print(f"Erreur get_tickets: {e}")
+        return {
+            "error": f"Erreur interne: {str(e)}",
+            "date": day,
+            "safe": {"name": "Ticket Safe", "total_cote": 1.0, "count": 0, "picks": []},
+            "medium": {"name": "Ticket Medium", "total_cote": 1.0, "count": 0, "picks": []},
+            "risky": {"name": "Ticket Risky", "total_cote": 1.0, "count": 0, "picks": []},
+        }
 # ===== PREDICTIONS JUSTES =====
 
 def _check_won_markets(m):
