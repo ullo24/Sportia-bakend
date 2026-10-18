@@ -36,7 +36,7 @@ LEAGUE_AVG_GOALS = {
 DAYS_AHEAD = 7
 HOME_ADVANTAGE = 1.18
 FREE_MATCHES_PER_DAY = 2
-MIGRATE_DB = False  # ⚠️ Passe a False apres le premier deploiement reussi
+MIGRATE_DB = True  # ⚠️ Passe a False apres le premier deploiement reussi
 
 
 # ===== BASE DE DONNEES =====
@@ -69,6 +69,8 @@ def init_db():
             handicap_home_minus1 REAL, handicap_away_minus1 REAL,
             handicap_home_plus1 REAL, handicap_away_plus1 REAL,
             exact_scores TEXT,
+            handicap_home_minus2 REAL, handicap_away_minus2 REAL,
+            first_half_over_15 REAL,
             home_scores REAL, away_scores REAL,
             home_xg REAL, away_xg REAL, total_xg REAL,
             confidence REAL,
@@ -273,6 +275,21 @@ def predict_extended_markets(home_xg, away_xg, home_win, draw, away_win):
 
     home_scores = 1 - poisson_prob(0, home_xg)
     away_scores = 1 - poisson_prob(0, away_xg)
+        # === Nouveaux marches ===
+    # Handicap -2 (gagne par 3+ buts)
+    handicap_home_minus2 = sum(p for (h, a), p in score_probs.items() if h - a >= 3)
+    handicap_away_minus2 = sum(p for (h, a), p in score_probs.items() if a - h >= 3)
+
+    # Over 1.5 buts en 1ere mi-temps
+    # 45% des buts arrivent en 1ere MT -> lambda_1MT = 0.45 * xg
+    h_xg_1mt = home_xg * 0.45
+    a_xg_1mt = away_xg * 0.45
+    p_h_0_1mt = math.exp(-h_xg_1mt)
+    p_h_1_1mt = h_xg_1mt * math.exp(-h_xg_1mt)
+    p_a_0_1mt = math.exp(-a_xg_1mt)
+    p_a_1_1mt = a_xg_1mt * math.exp(-a_xg_1mt)
+    prob_under_15_1mt = (p_h_0_1mt + p_h_1_1mt) * (p_a_0_1mt + p_a_1_1mt)
+    first_half_over_15 = 1 - prob_under_15_1mt
 
     return {
         "dc_1x": round(dc_1x, 3),
@@ -292,6 +309,9 @@ def predict_extended_markets(home_xg, away_xg, home_win, draw, away_win):
         "exact_scores": json.dumps(exact_scores),
         "home_scores": round(home_scores, 3),
         "away_scores": round(away_scores, 3),
+        "handicap_home_minus2": round(handicap_home_minus2, 3),
+        "handicap_away_minus2": round(handicap_away_minus2, 3),
+        "first_half_over_15": round(first_half_over_15, 3),
     }
 
 
@@ -410,6 +430,8 @@ async def daily_pipeline():
                  over_05, under_05, btts_over_25, btts_under_35,
                  handicap_home_minus1, handicap_away_minus1,
                  handicap_home_plus1, handicap_away_plus1,
+                 handicap_home_minus2, handicap_away_minus2,
+                 first_half_over_15,
                  exact_scores, home_scores, away_scores,
                  home_xg, away_xg, total_xg, confidence, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -435,6 +457,8 @@ async def daily_pipeline():
                     ext["btts_over_25"], ext["btts_under_35"],
                     ext["handicap_home_minus1"], ext["handicap_away_minus1"],
                     ext["handicap_home_plus1"], ext["handicap_away_plus1"],
+                    ext["handicap_home_minus2"], ext["handicap_away_minus2"],
+                    ext["first_half_over_15"],
                     ext["exact_scores"], ext["home_scores"], ext["away_scores"],
                     pred["home_xg"], pred["away_xg"], pred["total_xg"],
                     pred["confidence"],
@@ -691,6 +715,87 @@ def get_leagues():
     conn.close()
     return [r["league"] for r in rows]
 
+def _calc_risky_pick(m):
+    """
+    Choisit LE MEILLEUR pick risky pour un match selon les criteres metier.
+    Retourne None si aucun pick ne convient.
+    """
+    hw = m.get("home_win", 0) or 0
+    d = m.get("draw", 0) or 0
+    aw = m.get("away_win", 0) or 0
+    over_25 = m.get("over_25", 0) or 0
+    over_35 = m.get("over_35", 0) or 0
+    under_25 = m.get("under_25", 0) or 0
+    btts = m.get("btts_yes", 0) or 0
+    fh_goal = m.get("first_half_goal", 0) or 0
+    fh_over_15 = m.get("first_half_over_15", 0) or 0
+    hcp2_home = m.get("handicap_home_minus2", 0) or 0
+    hcp2_away = m.get("handicap_away_minus2", 0) or 0
+    home_xg = m.get("home_xg", 0) or 0
+    away_xg = m.get("away_xg", 0) or 0
+    total_xg = m.get("total_xg", 0) or 0
+
+    candidates = []
+
+    # 1. V1 ou V2 si proba >= 75%
+    if hw >= 0.75:
+        candidates.append(("1", m["home"], hw, 1.0 / hw))
+    if aw >= 0.75:
+        candidates.append(("2", m["away"], aw, 1.0 / aw))
+
+    # 2. X si les 2 equipes faibles en attaque et faible rendement victoires
+    if home_xg < 1.3 and away_xg < 1.3 and hw < 0.40 and aw < 0.40 and d >= 0.28:
+        candidates.append(("X", "Match nul", d, 1.0 / d))
+
+    # 3. Handicap -2 si favori largement superieur
+    if hw > 0.70 and home_xg > 1.9 and away_xg < 1.0 and hcp2_home > 0.28:
+        candidates.append(("H-2 D", "Handicap -2 " + m["home"], hcp2_home, 1.0 / hcp2_home))
+    if aw > 0.70 and away_xg > 1.9 and home_xg < 1.0 and hcp2_away > 0.28:
+        candidates.append(("H-2 E", "Handicap -2 " + m["away"], hcp2_away, 1.0 / hcp2_away))
+
+    # 4. Plus 2.5 buts si cote entre 1.4 et 1.6 (proba entre 0.625 et 0.714)
+    if 0.62 <= over_25 <= 0.72:
+        candidates.append(("+2.5", "+2.5 buts", over_25, 1.0 / over_25))
+
+    # 5. BTTS si cote >= 1.3 (proba <= 0.769) et raisonnable (>= 0.55)
+    if 0.55 <= btts <= 0.77:
+        candidates.append(("BTTS", "Les 2 equipes marquent", btts, 1.0 / btts))
+
+    # 6. Plus 3.5 si 2 equipes tres fortes attaque et faibles defenses
+    if total_xg > 3.5 and over_35 > 0.45:
+        candidates.append(("+3.5", "+3.5 buts", over_35, 1.0 / over_35))
+
+    # 7. But en 1ere MT
+    if fh_goal >= 0.60:
+        candidates.append(("1MT", "But en 1ere MT", fh_goal, 1.0 / fh_goal))
+
+    # 8. Plus 1.5 buts en 1ere MT
+    if fh_over_15 >= 0.28:
+        candidates.append(("+1.5 1MT", "+1.5 buts 1ere MT", fh_over_15, 1.0 / fh_over_15))
+
+    # 9. Moins 2.5 buts si les 2 equipes marquent peu
+    if total_xg < 2.3 and under_25 > 0.55:
+        candidates.append(("-2.5", "-2.5 buts", under_25, 1.0 / under_25))
+
+    if not candidates:
+        return None
+
+    # Priorite a la cote la plus elevee (pour maximiser la cote du ticket)
+    best = max(candidates, key=lambda x: x[3])
+
+    return {
+        "match_id": m["id"],
+        "home": m["home"],
+        "away": m["away"],
+        "league": m["league"],
+        "kickoff": m["kickoff"],
+        "home_logo": m["home_logo"],
+        "away_logo": m["away_logo"],
+        "market": best[0],
+        "description": best[1],
+        "proba": round(best[2], 3),
+        "cote": round(best[3], 2),
+    }
 
 @app.get("/tickets/{day}")
 def get_tickets(day: str):
@@ -989,7 +1094,54 @@ def get_tickets(day: str):
     # Les matchs peuvent apparaitre dans plusieurs tickets (marches differents).
     safe = _build_ticket(all_picks, 2.0, 2, 3)
     medium = _build_ticket(all_picks, 120.0, 10, 15)
-    risky = _build_ticket_multi(all_picks, 1500.0, 18, 25, max_per_match=2)
+        # === RISKY : logique specifique avec criteres metier ===
+    risky_picks = []
+    used_ids = set()
+    for r in rows:
+        m = dict(r)
+        pick = _calc_risky_pick(m)
+        if pick:
+            risky_picks.append(pick)
+            used_ids.add(m["id"])
+
+    # Si pas assez de picks qualifies (< 8), on complete avec les meilleurs picks classiques
+    if len(risky_picks) < 8:
+        for r in rows:
+            m = dict(r)
+            if m["id"] in used_ids:
+                continue
+            best_pick = None
+            best_cote = 0
+            for label, prob, desc in [
+                ("+2.5", m.get("over_25"), "+2.5 buts"),
+                ("+3.5", m.get("over_35"), "+3.5 buts"),
+                ("BTTS", m.get("btts_yes"), "Les 2 equipes marquent"),
+                ("1MT", m.get("first_half_goal"), "But en 1ere MT"),
+                ("+1.5 1MT", m.get("first_half_over_15"), "+1.5 buts 1ere MT"),
+            ]:
+                if prob and 0.42 <= prob <= 0.75:
+                    cote = 1.0 / prob
+                    if cote > best_cote:
+                        best_cote = cote
+                        best_pick = {
+                            "match_id": m["id"],
+                            "home": m["home"],
+                            "away": m["away"],
+                            "league": m["league"],
+                            "kickoff": m["kickoff"],
+                            "home_logo": m["home_logo"],
+                            "away_logo": m["away_logo"],
+                            "market": label,
+                            "description": desc,
+                            "proba": round(prob, 3),
+                            "cote": round(cote, 2),
+                        }
+            if best_pick:
+                risky_picks.append(best_pick)
+                used_ids.add(m["id"])
+
+    # Construit le ticket en visant 1500 (cote max atteignable selon les picks)
+    risky = _build_ticket(risky_picks, 1500.0, 6, 20)
     return {
         "date": day,
         "safe": {
