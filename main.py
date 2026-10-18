@@ -17,6 +17,7 @@ API_KEY = os.getenv("FOOTBALL_DATA_KEY")
 if not API_KEY:
     print("ATTENTION : FOOTBALL_DATA_KEY n'est pas definie !")
 
+
 BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": API_KEY or ""}
 DB_PATH = "/tmp/sportia.db"
