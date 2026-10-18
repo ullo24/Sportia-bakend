@@ -468,25 +468,24 @@ def mark_free_access():
 
 # ===== TICKETS DU JOUR =====
 
-def _build_pick_for_match(m):
+def _all_picks_for_match(m):
+    """Retourne TOUS les picks valides pour un match (tous les marches)."""
     markets = [
-        ("1", m["home_win"], m["home"]),
-        ("X", m["draw"], "Match nul"),
-        ("2", m["away_win"], m["away"]),
-        ("+1.5", m["over_15"], "+1.5 buts"),
-        ("+2.5", m["over_25"], "+2.5 buts"),
-        ("-3.5", m["under_35"], "-3.5 buts"),
-        ("-4.5", m["under_45"], "-4.5 buts"),
-        ("BTTS", m["btts_yes"], "Les 2 equipes marquent"),
-        ("1MT", m["first_half_goal"], "But en 1ere MT"),
-    ]
-    extended = [
+        ("1", m.get("home_win"), m["home"]),
+        ("X", m.get("draw"), "Match nul"),
+        ("2", m.get("away_win"), m["away"]),
+        ("+0.5", m.get("over_05"), "Over 0.5 but"),
+        ("+1.5", m.get("over_15"), "+1.5 buts"),
+        ("+2.5", m.get("over_25"), "+2.5 buts"),
+        ("-3.5", m.get("under_35"), "-3.5 buts"),
+        ("-4.5", m.get("under_45"), "-4.5 buts"),
+        ("BTTS", m.get("btts_yes"), "Les 2 equipes marquent"),
+        ("1MT", m.get("first_half_goal"), "But en 1ere MT"),
         ("1X", m.get("dc_1x"), "Double Chance 1X"),
         ("12", m.get("dc_12"), "Double Chance 12"),
         ("X2", m.get("dc_x2"), "Double Chance X2"),
         ("DNB D", m.get("dnb_home"), "Draw No Bet Domicile"),
         ("DNB E", m.get("dnb_away"), "Draw No Bet Exterieur"),
-        ("+0.5", m.get("over_05"), "Over 0.5 but"),
         ("BTTS+2.5", m.get("btts_over_25"), "BTTS & Over 2.5"),
         ("BTTS-3.5", m.get("btts_under_35"), "BTTS & Under 3.5"),
         ("H-1 D", m.get("handicap_home_minus1"), "Handicap -1 Domicile"),
@@ -496,48 +495,75 @@ def _build_pick_for_match(m):
         ("Dom. marque", m.get("home_scores"), "Domicile marque"),
         ("Ext. marque", m.get("away_scores"), "Exterieur marque"),
     ]
-
-    best = None
-    best_dist = 999
-    for label, prob, desc in (markets + extended):
-        if prob is None or prob < 0.45:
+    picks = []
+    for label, prob, desc in markets:
+        if prob is None:
+            continue
+        # Garde uniquement les probas interessantes (cotes entre 1.15 et 3.5)
+        if prob < 0.28 or prob > 0.88:
             continue
         cote = 1.0 / prob
-        dist = abs(cote - 1.35)
-        if dist < best_dist:
-            best_dist = dist
-            best = {
-                "match_id": m["id"],
-                "home": m["home"],
-                "away": m["away"],
-                "league": m["league"],
-                "kickoff": m["kickoff"],
-                "home_logo": m["home_logo"],
-                "away_logo": m["away_logo"],
-                "market": label,
-                "description": desc,
-                "proba": round(prob, 3),
-                "cote": round(cote, 2),
-            }
-    return best
+        if cote < 1.15 or cote > 3.5:
+            continue
+        picks.append({
+            "match_id": m["id"],
+            "home": m["home"],
+            "away": m["away"],
+            "league": m["league"],
+            "kickoff": m["kickoff"],
+            "home_logo": m["home_logo"],
+            "away_logo": m["away_logo"],
+            "market": label,
+            "description": desc,
+            "proba": round(prob, 3),
+            "cote": round(cote, 2),
+        })
+    return picks
 
 
-def _select_for_target(picks, target, min_n, max_n):
-    if not picks:
+def _calc_total_cote(picks):
+    c = 1.0
+    for p in picks:
+        c *= p["cote"]
+    return round(c, 2)
+
+
+def _select_ticket(all_picks, target_cote, min_n, max_n, max_per_match=2):
+    """
+    Selectionne les meilleurs picks pour atteindre la cote cible.
+    - Autorise jusqu'a max_per_match picks par match (marches differents)
+    - Essaie differents nombres de picks entre min_n et max_n
+    """
+    if not all_picks:
         return []
-    best_combo = []
+    sorted_picks = sorted(all_picks, key=lambda x: x["cote"])
+    n_max = min(max_n, len(sorted_picks))
+    n_min = min(min_n, n_max)
+    if n_max == 0:
+        return []
+
+    best = []
     best_diff = float('inf')
-    for n in range(min_n, min(max_n + 1, len(picks) + 1)):
-        combo = picks[:n]
-        cote = 1.0
-        for p in combo:
-            cote *= p["cote"]
-        diff = abs(cote - target)
+
+    for n in range(n_min, n_max + 1):
+        combo = []
+        used_count = {}
+        for p in sorted_picks:
+            if len(combo) >= n:
+                break
+            cnt = used_count.get(p["match_id"], 0)
+            if cnt < max_per_match:
+                combo.append(p)
+                used_count[p["match_id"]] = cnt + 1
+        if len(combo) < n:
+            continue
+        cote = _calc_total_cote(combo)
+        diff = abs(cote - target_cote)
         if diff < best_diff:
             best_diff = diff
-            best_combo = combo
-    return best_combo
+            best = combo
 
+    return best
 
 # ===== APP =====
 
@@ -668,6 +694,7 @@ def get_leagues():
 
 @app.get("/tickets/{day}")
 def get_tickets(day: str):
+    """Genere les 3 tickets du jour (safe, medium, risky)."""
     conn = db()
     rows = conn.execute(
         "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)
@@ -677,56 +704,57 @@ def get_tickets(day: str):
     if not rows:
         return {"error": "Aucun match pour cette date"}
 
+    # 1. Genere TOUS les picks de TOUS les matchs
     all_picks = []
     for r in rows:
         m = dict(r)
-        pick = _build_pick_for_match(m)
-        if pick:
-            all_picks.append(pick)
+        all_picks.extend(_all_picks_for_match(m))
 
     if not all_picks:
         return {"error": "Aucun pick disponible"}
 
+    # 2. Trie global par cote
     all_picks.sort(key=lambda x: x["cote"])
 
-    safe = _select_for_target(all_picks, 2.0, 2, 3)
-    safe_ids = set(p["match_id"] for p in safe)
+    # 3. Safe : 2 picks, cote ~2 (1 pick par match, les plus fiables)
+    safe = _select_ticket(all_picks, 2.0, 2, 3, max_per_match=1)
+    safe_match_ids = set(p["match_id"] for p in safe)
 
-    remaining = [p for p in all_picks if p["match_id"] not in safe_ids]
-    medium = _select_for_target(remaining, 120.0, 12, 15)
-    medium_ids = set(p["match_id"] for p in medium)
+    # 4. Medium : 12-15 picks, cote ~120 (1 pick par match, en evitant le safe)
+    medium_pool = [p for p in all_picks if p["match_id"] not in safe_match_ids]
+    medium = _select_ticket(medium_pool, 120.0, 12, 15, max_per_match=1)
+    medium_match_ids = set(p["match_id"] for p in medium)
 
-    remaining2 = [p for p in remaining if p["match_id"] not in medium_ids]
-    risky = _select_for_target(remaining2, 1500.0, 25, 35)
-
-    def _total_cote(picks):
-        c = 1.0
-        for p in picks:
-            c *= p["cote"]
-        return round(c, 2)
+    # 5. Risky : 25-35 picks, cote ~1500
+    #    On autorise 2 picks par match (marches differents)
+    used_ids = safe_match_ids | medium_match_ids
+    risky_pool = [p for p in all_picks if p["match_id"] not in used_ids]
+    # Si pas assez de picks, on ajoute les autres matchs (autorises)
+    if len(risky_pool) < 25:
+        risky_pool = all_picks  # fallback : autorise tous les matchs
+    risky = _select_ticket(risky_pool, 1500.0, 25, 35, max_per_match=2)
 
     return {
         "date": day,
         "safe": {
             "name": "Ticket Safe",
-            "total_cote": _total_cote(safe),
+            "total_cote": _calc_total_cote(safe),
             "count": len(safe),
             "picks": safe,
         },
         "medium": {
             "name": "Ticket Medium",
-            "total_cote": _total_cote(medium),
+            "total_cote": _calc_total_cote(medium),
             "count": len(medium),
             "picks": medium,
         },
         "risky": {
             "name": "Ticket Risky",
-            "total_cote": _total_cote(risky),
+            "total_cote": _calc_total_cote(risky),
             "count": len(risky),
             "picks": risky,
         },
     }
-
 
 @app.get("/live-scores/{day}")
 async def get_live_scores(day: str, refresh: bool = False):
