@@ -42,9 +42,10 @@ FREE_MATCHES_PER_DAY = 2
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("DROP TABLE IF EXISTS matches")
+    # ATTENTION : plus de DROP TABLE. La base est conservee entre redeploiements.
+    # Si tu dois ajouter une colonne, fais un DROP une seule fois puis retire-le.
     c.execute("""
-        CREATE TABLE matches (
+        CREATE TABLE IF NOT EXISTS matches (
             id INTEGER PRIMARY KEY,
             league TEXT, country TEXT,
             home TEXT, away TEXT,
@@ -97,43 +98,30 @@ def get_today_count() -> int:
     return row["count"] if row else 0
 
 
-# ===== LOGOS DES EQUIPES (TheSportsDB) =====
+# ===== LOGOS =====
 
 async def get_team_logo(team_data: dict) -> str:
-    """
-    Recupere le logo depuis football-data.org (champ 'crest').
-    Fallback sur TheSportsDB si absent.
-    """
-    # 1. Priorite : le crest fourni par football-data.org
     crest = team_data.get("crest")
     if crest:
-        # Force l'extension .svg (le format officiel de football-data.org)
         if not crest.endswith('.svg'):
             crest = crest.rsplit('.', 1)[0] + '.svg'
         return crest
 
-    # 2. Fallback TheSportsDB (avec gestion d'erreur)
     team_name = team_data.get("name") or team_data.get("shortName", "")
     if not team_name:
         return ""
 
-    # Verifie le cache
     conn = db()
-    row = conn.execute(
-        "SELECT logo FROM team_logos WHERE team=?", (team_name,)
-    ).fetchone()
+    row = conn.execute("SELECT logo FROM team_logos WHERE team=?", (team_name,)).fetchone()
     conn.close()
     if row and row["logo"]:
         return row["logo"]
 
-    # Appel TheSportsDB protege
     url = "https://www.thesportsdb.com/api/v1/json/3/searchteams.php"
     try:
         async with httpx.AsyncClient(timeout=8) as client:
             r = await client.get(url, params={"t": team_name})
-            content_type = r.headers.get("content-type", "")
-            if "application/json" not in content_type:
-                print("TSDB non-JSON pour " + team_name)
+            if "application/json" not in r.headers.get("content-type", ""):
                 return ""
             data = r.json()
             teams = data.get("teams")
@@ -152,54 +140,10 @@ async def get_team_logo(team_data: dict) -> str:
                             return logo
     except Exception as e:
         print("Erreur logo " + team_name + ": " + str(e))
-
-    return ""
-    
-    # 2. Fallback TheSportsDB (avec gestion d'erreur)
-    team_name = team_data.get("name") or team_data.get("shortName", "")
-    if not team_name:
-        return ""
-
-    # Verifie le cache
-    conn = db()
-    row = conn.execute(
-        "SELECT logo FROM team_logos WHERE team=?", (team_name,)
-    ).fetchone()
-    conn.close()
-    if row and row["logo"]:
-        return row["logo"]
-
-    # Appel TheSportsDB protege
-    url = "https://www.thesportsdb.com/api/v1/json/3/searchteams.php"
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            r = await client.get(url, params={"t": team_name})
-            # Verifie que c'est bien du JSON
-            content_type = r.headers.get("content-type", "")
-            if "application/json" not in content_type:
-                print(f"TSDB non-JSON pour {team_name} (probable rate limit)")
-                return ""
-            data = r.json()
-            teams = data.get("teams")
-            if teams:
-                for t in teams:
-                    if t.get("strTeam", "").lower() == team_name.lower():
-                        logo = t.get("strTeamBadge") or t.get("strTeamLogo")
-                        if logo:
-                            conn = db()
-                            conn.execute(
-                                "INSERT OR REPLACE INTO team_logos (team, logo) VALUES (?, ?)",
-                                (team_name, logo),
-                            )
-                            conn.commit()
-                            conn.close()
-                            return logo
-    except Exception as e:
-        print(f"Erreur logo {team_name}: {e}")
-
     return ""
 
-# ===== MOTEUR DE PREDICTION (Poisson) =====
+
+# ===== MODELE POISSON =====
 
 def poisson_prob(k: int, lam: float) -> float:
     return (lam ** k) * math.exp(-lam) / math.factorial(k)
@@ -234,22 +178,16 @@ def predict_all_markets(home_xg: float, away_xg: float) -> dict:
         return sum(p for t, p in total_dist.items() if t > line)
 
     over_15 = over(1.5)
-    under_15 = 1 - over_15
     over_25 = over(2.5)
-    under_25 = 1 - over_25
     over_35 = over(3.5)
-    under_35 = 1 - over_35
     over_45 = over(4.5)
-    under_45 = 1 - over_45
 
     p_home_scores = 1 - poisson_prob(0, home_xg)
     p_away_scores = 1 - poisson_prob(0, away_xg)
     btts_yes = p_home_scores * p_away_scores
-    btts_no = 1 - btts_yes
 
     total_xg = home_xg + away_xg
     first_half_goal = 1 - math.exp(-0.45 * total_xg)
-
     handicap_home_1 = sum(p for (h, a), p in score_probs.items() if h - a >= 2)
     handicap_away_1 = sum(p for (h, a), p in score_probs.items() if a - h >= 2)
 
@@ -262,15 +200,15 @@ def predict_all_markets(home_xg: float, away_xg: float) -> dict:
         "draw": round(draw, 3),
         "away_win": round(away_win, 3),
         "over_15": round(over_15, 3),
-        "under_15": round(under_15, 3),
+        "under_15": round(1 - over_15, 3),
         "over_25": round(over_25, 3),
-        "under_25": round(under_25, 3),
+        "under_25": round(1 - over_25, 3),
         "over_35": round(over_35, 3),
-        "under_35": round(under_35, 3),
+        "under_35": round(1 - over_35, 3),
         "over_45": round(over_45, 3),
-        "under_45": round(under_45, 3),
+        "under_45": round(1 - over_45, 3),
         "btts_yes": round(btts_yes, 3),
-        "btts_no": round(btts_no, 3),
+        "btts_no": round(1 - btts_yes, 3),
         "first_half_goal": round(first_half_goal, 3),
         "handicap_home_1": round(handicap_home_1, 3),
         "handicap_away_1": round(handicap_away_1, 3),
@@ -285,31 +223,19 @@ def generate_analysis(match: dict) -> str:
     home = match["home"]
     away = match["away"]
     league = match["league"]
-    hw = match["home_win"]
-    d = match["draw"]
-    aw = match["away_win"]
-    over_15 = match["over_15"]
-    over_25 = match["over_25"]
-    under_35 = match["under_35"]
-    btts = match["btts_yes"]
-    fh = match["first_half_goal"]
-    hxg = match["home_xg"]
-    axg = match["away_xg"]
-    total_xg = match["total_xg"]
+    hw, d, aw = match["home_win"], match["draw"], match["away_win"]
+    over_15, over_25, under_35 = match["over_15"], match["over_25"], match["under_35"]
+    btts, fh = match["btts_yes"], match["first_half_goal"]
+    hxg, axg, total_xg = match["home_xg"], match["away_xg"], match["total_xg"]
 
     markets = {
-        "Victoire " + home: hw,
-        "Match nul": d,
-        "Victoire " + away: aw,
-        "+1.5 buts": over_15,
-        "+2.5 buts": over_25,
-        "-3.5 buts": under_35,
-        "Les 2 equipes marquent": btts,
-        "But en 1ere MT": fh,
+        "Victoire " + home: hw, "Match nul": d, "Victoire " + away: aw,
+        "+1.5 buts": over_15, "+2.5 buts": over_25, "-3.5 buts": under_35,
+        "Les 2 equipes marquent": btts, "But en 1ere MT": fh,
     }
     best_name, best_prob = max(markets.items(), key=lambda x: x[1])
 
-    lines = [
+    return "\n".join([
         home + " vs " + away + " (" + league + ")",
         "",
         "Buts attendus : " + str(total_xg) + " (dom " + str(hxg) + " - ext " + str(axg) + ")",
@@ -318,9 +244,10 @@ def generate_analysis(match: dict) -> str:
         "BTTS : " + str(round(btts * 100)) + "% | But 1MT : " + str(round(fh * 100)) + "%",
         "",
         "Pronostic recommande : " + best_name + " (" + str(round(best_prob * 100)) + "%)",
-    ]
-    return "\n".join(lines)
+    ])
 
+
+# ===== PIPELINE =====
 
 async def fetch_competition_matches(code: str, date_from: str, date_to: str):
     url = BASE_URL + "/competitions/" + code + "/matches"
@@ -353,11 +280,9 @@ async def daily_pipeline():
         await asyncio.sleep(6)
 
     print(str(len(all_matches)) + " matchs recuperes")
-
     if not all_matches:
         return
 
-        # Etape A : recupere les logos (crest football-data.org prioritaire)
     print("Recuperation des logos...")
     logos = {}
     for m in all_matches:
@@ -366,22 +291,15 @@ async def daily_pipeline():
             away_team = m["awayTeam"]
             home_name = home_team.get("name") or home_team.get("shortName", "?")
             away_name = away_team.get("name") or away_team.get("shortName", "?")
-
             if home_name not in logos:
                 logos[home_name] = await get_team_logo(home_team)
             if away_name not in logos:
                 logos[away_name] = await get_team_logo(away_team)
-
-            # Pause uniquement si on a du appeler TheSportsDB (fallback)
-            # On ne peut pas le savoir facilement, donc on garde une pause courte
             await asyncio.sleep(0.5)
         except (KeyError, TypeError):
             continue
+    print(str(len(logos)) + " logos recuperes")
 
-    print(f"{len(logos)} logos recuperes") 
-
-    
-    # Etape B : insere les matchs en base
     conn = db()
     inserted = 0
     for m in all_matches:
@@ -405,31 +323,22 @@ async def daily_pipeline():
                 INSERT OR REPLACE INTO matches
                 (id, league, country, home, away, home_logo, away_logo,
                  kickoff, status, home_goals, away_goals,
-                 home_win, draw, away_win,
-                 over_15, under_15, over_25, under_25,
-                 over_35, under_35, over_45, under_45,
-                 btts_yes, btts_no, first_half_goal,
-                 handicap_home_1, handicap_away_1,
-                 home_xg, away_xg, total_xg,
-                 confidence, updated_at)
+                 home_win, draw, away_win, over_15, under_15, over_25, under_25,
+                 over_35, under_35, over_45, under_45, btts_yes, btts_no,
+                 first_half_goal, handicap_home_1, handicap_away_1,
+                 home_xg, away_xg, total_xg, confidence, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    match_id, league, country, home, away,
-                    logos.get(home, ""), logos.get(away, ""),
-                    kickoff, status, home_goals, away_goals,
-                    pred["home_win"], pred["draw"], pred["away_win"],
-                    pred["over_15"], pred["under_15"],
-                    pred["over_25"], pred["under_25"],
-                    pred["over_35"], pred["under_35"],
-                    pred["over_45"], pred["under_45"],
-                    pred["btts_yes"], pred["btts_no"],
-                    pred["first_half_goal"],
-                    pred["handicap_home_1"], pred["handicap_away_1"],
-                    pred["home_xg"], pred["away_xg"], pred["total_xg"],
-                    pred["confidence"],
-                    datetime.now().isoformat(),
-                ),
+                (match_id, league, country, home, away,
+                 logos.get(home, ""), logos.get(away, ""),
+                 kickoff, status, home_goals, away_goals,
+                 pred["home_win"], pred["draw"], pred["away_win"],
+                 pred["over_15"], pred["under_15"], pred["over_25"], pred["under_25"],
+                 pred["over_35"], pred["under_35"], pred["over_45"], pred["under_45"],
+                 pred["btts_yes"], pred["btts_no"], pred["first_half_goal"],
+                 pred["handicap_home_1"], pred["handicap_away_1"],
+                 pred["home_xg"], pred["away_xg"], pred["total_xg"],
+                 pred["confidence"], datetime.now().isoformat()),
             )
             inserted += 1
         except Exception as e:
@@ -438,22 +347,17 @@ async def daily_pipeline():
     conn.commit()
     conn.close()
     print(str(inserted) + " matchs enregistres")
-
     mark_free_access()
 
 
 def mark_free_access():
     today = date.today().isoformat()
     conn = db()
-    conn.execute(
-        "UPDATE matches SET free_access = 0 WHERE date(kickoff) = ?",
-        (today,),
-    )
+    conn.execute("UPDATE matches SET free_access = 0 WHERE date(kickoff) = ?", (today,))
     conn.execute(
         "UPDATE matches SET free_access = 1 WHERE id IN ("
         "SELECT id FROM matches WHERE date(kickoff) = ? "
-        "AND confidence IS NOT NULL "
-        "ORDER BY confidence DESC LIMIT ?)",
+        "AND confidence IS NOT NULL ORDER BY confidence DESC LIMIT ?)",
         (today, FREE_MATCHES_PER_DAY),
     )
     conn.commit()
@@ -461,10 +365,9 @@ def mark_free_access():
     print("Top " + str(FREE_MATCHES_PER_DAY) + " matchs marques comme gratuits")
 
 
-# ===== APP FASTAPI =====
+# ===== APP =====
 
 scheduler = AsyncIOScheduler()
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -479,85 +382,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SportIA Predict", lifespan=lifespan)
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
 
 @app.get("/")
-# ===== SCORES EN DIRECT (worldcup26.ir) =====
-
-LIVE_API_BASE = "https://worldcup26.ir"
-
-# Mapping des codes de compétitions football-data.org vers les slugs de l'API live
-LIVE_LEAGUE_MAP = {
-    "PL": "eng.1",   # Premier League
-    "PD": "esp.1",   # La Liga
-    # Les autres ligues ne sont pas encore couvertes par l'API live gratuite
-}
-
-async def fetch_live_scores_for_league(league_slug: str, day_str: str):
-    """
-    Recupere les scores en direct pour une ligue et une date donnee.
-    day_str au format YYYYMMDD.
-    """
-    url = f"{LIVE_API_BASE}/get/soccer/{league_slug}/scoreboard"
-    params = {"dates": day_str}
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(url, params=params)
-            if r.status_code != 200:
-                print(f"Live API {league_slug} : {r.status_code}")
-                return []
-            data = r.json()
-            return data.get("events", [])
-    except Exception as e:
-        print(f"Erreur live {league_slug}: {e}")
-        return []
-
-
-@app.get("/live-scores/{day}")
-async def get_live_scores(day: str):
-    """
-    Retourne les scores en direct pour une date (format YYYY-MM-DD).
-    Fusionne avec les matchs de la base pour enrichir les infos.
-    """
-    # Convertit YYYY-MM-DD en YYYYMMDD pour l'API live
-    day_compact = day.replace("-", "")
-
-    live_matches = []
-    for league_code, slug in LIVE_LEAGUE_MAP.items():
-        events = await fetch_live_scores_for_league(slug, day_compact)
-        for ev in events:
-            # Extrait les infos utiles de la reponse de l'API live
-            status = ev.get("status", {})
-            status_type = status.get("type", {})
-            state = status_type.get("state", "unknown")  # pre, in, post
-            clock = status.get("displayClock") or status.get("clock") or ""
-
-            competition = ev.get("competitions", [{}])[0]
-            competitors = competition.get("competitors", [])
-            home_team = next((c for c in competitors if c.get("homeAway") == "home"), {})
-            away_team = next((c for c in competitors if c.get("homeAway") == "away"), {})
-
-            live_matches.append({
-                "live_id": ev.get("id"),
-                "league_slug": slug,
-                "league_code": league_code,
-                "home_name": home_team.get("team", {}).get("displayName", "?"),
-                "away_name": away_team.get("team", {}).get("displayName", "?"),
-                "home_score": home_team.get("score"),
-                "away_score": away_team.get("score"),
-                "status_state": state,  # pre / in / post
-                "status_detail": status_type.get("shortDetail", ""),
-                "clock": clock,
-            })
-
-    return live_matches
 def root():
-    return {"status": "ok", "app": "SportIA Predict", "version": "2.1"}
+    return {"status": "ok", "app": "SportIA Predict", "version": "2.2"}
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
@@ -575,8 +406,7 @@ def quota():
 def get_matches(day: str):
     conn = db()
     rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC",
-        (day,),
+        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)
     ).fetchall()
     conn.close()
     result = []
@@ -585,6 +415,7 @@ def get_matches(day: str):
         m["analysis"] = generate_analysis(m)
         result.append(m)
     return result
+
 
 @app.get("/matches-week")
 def matches_week():
@@ -603,12 +434,12 @@ def matches_week():
         result.append(m)
     return result
 
+
 @app.get("/predictions/{day}/free")
 def get_free_predictions(day: str):
     conn = db()
     rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff)=? AND free_access=1 "
-        "ORDER BY confidence DESC",
+        "SELECT * FROM matches WHERE date(kickoff)=? AND free_access=1 ORDER BY confidence DESC",
         (day,),
     ).fetchall()
     conn.close()
@@ -624,8 +455,7 @@ def get_free_predictions(day: str):
 def get_premium_predictions(day: str):
     conn = db()
     rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY confidence DESC",
-        (day,),
+        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY confidence DESC", (day,)
     ).fetchall()
     conn.close()
     result = []
@@ -654,6 +484,58 @@ def get_leagues():
     rows = conn.execute("SELECT DISTINCT league FROM matches").fetchall()
     conn.close()
     return [r["league"] for r in rows]
+
+
+# ===== SCORES EN DIRECT =====
+
+_live_cache = {"day": None, "timestamp": None, "data": []}
+
+
+@app.get("/live-scores/{day}")
+async def get_live_scores(day: str, refresh: bool = False):
+    """
+    Retourne les matchs du jour avec leur statut + score.
+    Cache de 3 minutes pour economiser le quota FD.org.
+    """
+    global _live_cache
+    now = datetime.now()
+    cache_valid = (
+        _live_cache["day"] == day
+        and _live_cache["timestamp"] is not None
+        and (now - _live_cache["timestamp"]).total_seconds() < 180
+    )
+    if cache_valid and not refresh:
+        return _live_cache["data"]
+
+    all_results = []
+    for code in COMPETITIONS.keys():
+        try:
+            url = f"{BASE_URL}/competitions/{code}/matches"
+            params = {"dateFrom": day, "dateTo": day}
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(url, headers=HEADERS, params=params)
+                increment_count()
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                for m in data.get("matches", []):
+                    status = m.get("status", "")
+                    if status in ["IN_PLAY", "PAUSED", "FINISHED", "TIMED", "SCHEDULED"]:
+                        all_results.append({
+                            "id": m["id"],
+                            "home": m["homeTeam"]["name"],
+                            "away": m["awayTeam"]["name"],
+                            "status": status,
+                            "home_score": m.get("score", {}).get("fullTime", {}).get("home"),
+                            "away_score": m.get("score", {}).get("fullTime", {}).get("away"),
+                            "utc_date": m.get("utcDate"),
+                        })
+                await asyncio.sleep(6)
+        except Exception as e:
+            print("Live " + code + ": " + str(e))
+
+    _live_cache = {"day": day, "timestamp": now, "data": all_results}
+    return all_results
 
 
 @app.post("/refresh")
