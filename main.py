@@ -786,6 +786,206 @@ async def get_live_scores(day: str, refresh: bool = False):
             print("Live " + code + ": " + str(e))
     return all_results
 
+# ===== TICKETS DU JOUR =====
+
+def _all_picks_for_match(m):
+    """Retourne TOUS les picks valides pour un match (tous les marches)."""
+    markets = [
+        ("1", m.get("home_win"), m["home"]),
+        ("X", m.get("draw"), "Match nul"),
+        ("2", m.get("away_win"), m["away"]),
+        ("+0.5", m.get("over_05"), "Over 0.5 but"),
+        ("+1.5", m.get("over_15"), "+1.5 buts"),
+        ("+2.5", m.get("over_25"), "+2.5 buts"),
+        ("-3.5", m.get("under_35"), "-3.5 buts"),
+        ("-4.5", m.get("under_45"), "-4.5 buts"),
+        ("BTTS", m.get("btts_yes"), "Les 2 equipes marquent"),
+        ("1MT", m.get("first_half_goal"), "But en 1ere MT"),
+        ("1X", m.get("dc_1x"), "Double Chance 1X"),
+        ("12", m.get("dc_12"), "Double Chance 12"),
+        ("X2", m.get("dc_x2"), "Double Chance X2"),
+        ("DNB D", m.get("dnb_home"), "Draw No Bet Domicile"),
+        ("DNB E", m.get("dnb_away"), "Draw No Bet Exterieur"),
+        ("BTTS+2.5", m.get("btts_over_25"), "BTTS & Over 2.5"),
+        ("BTTS-3.5", m.get("btts_under_35"), "BTTS & Under 3.5"),
+        ("H-1 D", m.get("handicap_home_minus1"), "Handicap -1 Domicile"),
+        ("H-1 E", m.get("handicap_away_minus1"), "Handicap -1 Exterieur"),
+        ("H+1 D", m.get("handicap_home_plus1"), "Handicap +1 Domicile"),
+        ("H+1 E", m.get("handicap_away_plus1"), "Handicap +1 Exterieur"),
+        ("Dom. marque", m.get("home_scores"), "Domicile marque"),
+        ("Ext. marque", m.get("away_scores"), "Exterieur marque"),
+    ]
+    picks = []
+    for label, prob, desc in markets:
+        if prob is None:
+            continue
+        # Filtre elargi : cotes entre 1.20 et 1.80 uniquement
+        if prob < 0.55 or prob > 0.85:
+            continue
+        cote = 1.0 / prob
+        if cote < 1.20 or cote > 1.80:
+            continue
+        picks.append({
+            "match_id": m["id"],
+            "home": m["home"],
+            "away": m["away"],
+            "league": m["league"],
+            "kickoff": m["kickoff"],
+            "home_logo": m["home_logo"],
+            "away_logo": m["away_logo"],
+            "market": label,
+            "description": desc,
+            "proba": round(prob, 3),
+            "cote": round(cote, 2),
+        })
+    return picks
+
+
+def _calc_total_cote(picks):
+    """Calcule la cote totale d'un ticket (produit des cotes)."""
+    c = 1.0
+    for p in picks:
+        c *= p["cote"]
+    return round(c, 2)
+
+
+def _build_ticket(pool, target_cote, min_n, max_n):
+    """Construit un ticket avec 1 pick par match.
+    Essaie plusieurs tailles (entre min_n et max_n picks) et garde la cote
+    la plus proche de la cible."""
+    if not pool:
+        return []
+    sorted_pool = sorted(pool, key=lambda x: x["cote"])
+    n_max = min(max_n, len(sorted_pool))
+    n_min_actual = min(min_n, n_max)
+    if n_max == 0:
+        return []
+
+    best = []
+    best_diff = float('inf')
+    for n in range(n_min_actual, n_max + 1):
+        combo = []
+        used = set()
+        for p in sorted_pool:
+            if p["match_id"] in used:
+                continue
+            combo.append(p)
+            used.add(p["match_id"])
+            if len(combo) >= n:
+                break
+        if len(combo) < n_min_actual:
+            continue
+        cote = _calc_total_cote(combo)
+        diff = abs(cote - target_cote)
+        if diff < best_diff:
+            best_diff = diff
+            best = combo
+    return best if best else sorted_pool[:n_max]
+
+
+def _build_ticket_2pm(pool, target_cote, min_n, max_n, max_per_match=2):
+    """Fallback : autorise jusqu'a max_per_match picks par match
+    (avec des marches DIFFERENTS)."""
+    if not pool:
+        return []
+    sorted_pool = sorted(pool, key=lambda x: x["cote"])
+    n_max = min(max_n, len(sorted_pool))
+    n_min_actual = min(min_n, n_max)
+    if n_max == 0:
+        return []
+
+    best = []
+    best_diff = float('inf')
+    for n in range(n_min_actual, n_max + 1):
+        combo = []
+        used_markets = {}
+        for p in sorted_pool:
+            mid = p["match_id"]
+            markets = used_markets.get(mid, set())
+            if p["market"] in markets:
+                continue
+            if len(markets) >= max_per_match:
+                continue
+            combo.append(p)
+            used_markets.setdefault(mid, set()).add(p["market"])
+            if len(combo) >= n:
+                break
+        if len(combo) < n_min_actual:
+            continue
+        cote = _calc_total_cote(combo)
+        diff = abs(cote - target_cote)
+        if diff < best_diff:
+            best_diff = diff
+            best = combo
+    return best if best else []
+
+
+@app.get("/tickets/{day}")
+def get_tickets(day: str):
+    """Genere les 3 tickets du jour : cotes 1.20-1.80, 1 pick par match."""
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        return {"error": "Aucun match pour cette date"}
+
+    # 1. Collecte TOUS les picks de TOUS les matchs
+    all_picks = []
+    for r in rows:
+        m = dict(r)
+        all_picks.extend(_all_picks_for_match(m))
+
+    # 2. Filtre : cotes 1.20-1.80 uniquement
+    valid = [p for p in all_picks if 1.20 <= p["cote"] <= 1.80]
+    if not valid:
+        return {"error": "Pas de picks dans la plage 1.20-1.80"}
+
+    # 3. Trie par cote ascendante
+    valid.sort(key=lambda x: x["cote"])
+
+    # SAFE : 2-3 picks (cotes les plus basses), cible ~2.0
+    safe = _build_ticket(valid, 2.0, 2, 3)
+    safe_ids = {p["match_id"] for p in safe}
+
+    # MEDIUM : 10-15 picks, cible ~120, en excluant les matchs du safe
+    medium_pool = [p for p in valid if p["match_id"] not in safe_ids]
+    medium = _build_ticket(medium_pool, 120.0, 10, 15)
+    medium_ids = {p["match_id"] for p in medium}
+
+    # RISKY : 15-22 picks, cible ~1500, en excluant safe+medium
+    risky_pool = [p for p in valid if p["match_id"] not in (safe_ids | medium_ids)]
+    risky = _build_ticket(risky_pool, 1500.0, 15, 22)
+
+    # Fallback : si pas assez de matchs distincts (moins de 15),
+    # autorise 2 picks par match avec marches DIFFERENTS
+    if len(risky) < 15:
+        risky = _build_ticket_2pm(valid, 1500.0, 15, 22, max_per_match=2)
+
+    return {
+        "date": day,
+        "safe": {
+            "name": "Ticket Safe",
+            "total_cote": _calc_total_cote(safe),
+            "count": len(safe),
+            "picks": safe,
+        },
+        "medium": {
+            "name": "Ticket Medium",
+            "total_cote": _calc_total_cote(medium),
+            "count": len(medium),
+            "picks": medium,
+        },
+        "risky": {
+            "name": "Ticket Risky",
+            "total_cote": _calc_total_cote(risky),
+            "count": len(risky),
+            "picks": risky,
+        },
+    }
+
 
 @app.post("/refresh")
 async def manual_refresh():
