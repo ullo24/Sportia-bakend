@@ -856,39 +856,40 @@ def _calc_total_cote(picks):
     return round(c, 2)
 
 
-def _build_ticket(pool, target_cote, min_n, max_n, sort_desc=False):
-    """Construit un ticket avec 1 pick par match.
-    sort_desc=True : prend les cotes les plus elevees d'abord (pour medium/risky).
-    sort_desc=False : prend les cotes les plus basses d'abord (pour safe)."""
+def _build_ticket(pool, target_cote, min_n, max_n):
+    """Prend 1 pick par match, en priorisant les cotes LES PLUS HAUTES.
+    Retourne la combinaison dont la cote totale est la plus proche de la cible."""
     if not pool:
         return []
-    sorted_pool = sorted(pool, key=lambda x: x["cote"], reverse=sort_desc)
-    n_max = min(max_n, len(sorted_pool))
-    n_min_actual = min(min_n, n_max)
-    if n_max == 0:
-        return []
+    # Tri DESC : les cotes les plus elevees d'abord
+    sorted_pool = sorted(pool, key=lambda x: x["cote"], reverse=True)
 
+    # Prend jusqu'a max_n picks avec 1 par match
+    candidates = []
+    used = set()
+    for p in sorted_pool:
+        if p["match_id"] in used:
+            continue
+        candidates.append(p)
+        used.add(p["match_id"])
+        if len(candidates) >= max_n:
+            break
+
+    if len(candidates) < min_n:
+        return candidates
+
+    # Essaie toutes les tailles entre min_n et len(candidates)
     best = []
     best_diff = float('inf')
-    for n in range(n_min_actual, n_max + 1):
-        combo = []
-        used = set()
-        for p in sorted_pool:
-            if p["match_id"] in used:
-                continue
-            combo.append(p)
-            used.add(p["match_id"])
-            if len(combo) >= n:
-                break
-        if len(combo) < n_min_actual:
-            continue
+    for n in range(min_n, len(candidates) + 1):
+        combo = candidates[:n]
         cote = _calc_total_cote(combo)
         diff = abs(cote - target_cote)
         if diff < best_diff:
             best_diff = diff
             best = combo
-    return best if best else sorted_pool[:n_max]
-
+    return best
+    
 def _build_ticket_2pm(pool, target_cote, min_n, max_n, max_per_match=2):
     """Fallback : autorise jusqu'a max_per_match picks par match
     (avec des marches DIFFERENTS)."""
@@ -928,7 +929,7 @@ def _build_ticket_2pm(pool, target_cote, min_n, max_n, max_per_match=2):
 
 @app.get("/tickets/{day}")
 def get_tickets(day: str):
-    """3 tickets : cotes 1.20-2.50, 1 pick par match."""
+    """3 tickets avec plages de cotes distinctes pour atteindre les cibles."""
     conn = db()
     rows = conn.execute(
         "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)
@@ -946,36 +947,35 @@ def get_tickets(day: str):
     if not all_picks:
         return {"error": "Aucun pick disponible"}
 
-    # SAFE : cotes 1.20-1.50, sort ASC (les plus fiables), 2-3 picks, cible ~2
-    safe_pool = [p for p in all_picks if 1.20 <= p["cote"] <= 1.50]
-    safe = _build_ticket(safe_pool, 2.0, 2, 3, sort_desc=False)
+    # SAFE : cotes 1.20-1.45, 2-3 picks, 1 par match, cible ~2
+    safe_pool = [p for p in all_picks if 1.20 <= p["cote"] <= 1.45]
+    safe = _build_ticket(safe_pool, 2.0, 2, 3)
     safe_ids = {p["match_id"] for p in safe}
 
-    # MEDIUM : cotes 1.35-2.00, sort DESC (les plus elevees d'abord), 10-15 picks, cible 120
+    # MEDIUM : cotes 1.45-1.65, 10-15 picks, 1 par match, cible ~120
     medium_pool = [
         p for p in all_picks
-        if 1.35 <= p["cote"] <= 2.00 and p["match_id"] not in safe_ids
+        if 1.45 <= p["cote"] <= 1.65 and p["match_id"] not in safe_ids
     ]
-    medium = _build_ticket(medium_pool, 120.0, 10, 15, sort_desc=True)
+    medium = _build_ticket(medium_pool, 120.0, 10, 15)
     medium_ids = {p["match_id"] for p in medium}
 
-    # RISKY : cotes 1.40-2.50, sort DESC, 15-22 picks, cible 1500
+    # RISKY : cotes 1.60-1.85, 13-18 picks, 1 par match, cible ~1500
     risky_pool = [
         p for p in all_picks
-        if 1.40 <= p["cote"] <= 2.50
+        if 1.60 <= p["cote"] <= 1.85
         and p["match_id"] not in (safe_ids | medium_ids)
     ]
-    risky = _build_ticket(risky_pool, 1500.0, 15, 22, sort_desc=True)
+    risky = _build_ticket(risky_pool, 1500.0, 13, 18)
 
-    # Fallback : si pas assez de matchs (moins de 15), elargit en reprenant les matchs safe/medium
-    if len(risky) < 15:
+    # Fallback : si pas assez, elargit
+    if len(risky) < 13:
         wide_pool = [
             p for p in all_picks
-            if 1.30 <= p["cote"] <= 2.50 and p["match_id"] not in (safe_ids | medium_ids)
+            if 1.55 <= p["cote"] <= 1.95
+            and p["match_id"] not in (safe_ids | medium_ids)
         ]
-        if len(wide_pool) < 15:
-            wide_pool = [p for p in all_picks if 1.30 <= p["cote"] <= 2.50]
-        risky = _build_ticket(wide_pool, 1500.0, 15, 22, sort_desc=True)
+        risky = _build_ticket(wide_pool, 1500.0, 13, 18)
 
     return {
         "date": day,
@@ -998,7 +998,7 @@ def get_tickets(day: str):
             "picks": risky,
         },
     }
-
+    
 @app.get("/debug-picks/{day}")
 def debug_picks(day: str):
     """Liste TOUS les picks disponibles pour une date (debug)."""
