@@ -36,7 +36,7 @@ LEAGUE_AVG_GOALS = {
 DAYS_AHEAD = 7
 HOME_ADVANTAGE = 1.18
 FREE_MATCHES_PER_DAY = 2
-MIGRATE_DB = false  # ⚠️ Passe a False apres le premier deploiement reussi
+MIGRATE_DB = False  # ⚠️ Passe a False apres le premier deploiement reussi
 
 
 # ===== BASE DE DONNEES =====
