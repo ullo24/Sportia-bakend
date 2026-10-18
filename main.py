@@ -537,6 +537,132 @@ async def get_live_scores(day: str, refresh: bool = False):
     _live_cache = {"day": day, "timestamp": now, "data": all_results}
     return all_results
 
+# ===== TICKETS DU JOUR =====
+
+def _build_pick_for_match(m):
+    """Choisit le meilleur pick pour un match (cote proche de 1.35)."""
+    markets = [
+        ("1", m["home_win"], m["home"]),
+        ("X", m["draw"], "Match nul"),
+        ("2", m["away_win"], m["away"]),
+        ("+1.5", m["over_15"], "+1.5 buts"),
+        ("+2.5", m["over_25"], "+2.5 buts"),
+        ("-3.5", m["under_35"], "-3.5 buts"),
+        ("-4.5", m["under_45"], "-4.5 buts"),
+        ("BTTS", m["btts_yes"], "Les 2 equipes marquent"),
+        ("1MT", m["first_half_goal"], "But en 1ere MT"),
+    ]
+    best = None
+    best_dist = 999
+    for label, prob, desc in markets:
+        if prob < 0.50:
+            continue
+        cote = 1.0 / prob
+        dist = abs(cote - 1.35)
+        if dist < best_dist:
+            best_dist = dist
+            best = {
+                "match_id": m["id"],
+                "home": m["home"],
+                "away": m["away"],
+                "league": m["league"],
+                "kickoff": m["kickoff"],
+                "home_logo": m["home_logo"],
+                "away_logo": m["away_logo"],
+                "market": label,
+                "description": desc,
+                "proba": round(prob, 3),
+                "cote": round(cote, 2),
+            }
+    return best
+
+
+def _select_for_target(picks, target, min_n, max_n):
+    """Selectionne le meilleur nombre de picks pour atteindre une cote cible."""
+    if not picks:
+        return []
+    best_combo = []
+    best_diff = float('inf')
+    for n in range(min_n, min(max_n + 1, len(picks) + 1)):
+        combo = picks[:n]
+        cote = 1.0
+        for p in combo:
+            cote *= p["cote"]
+        diff = abs(cote - target)
+        if diff < best_diff:
+            best_diff = diff
+            best_combo = combo
+    return best_combo
+
+
+@app.get("/tickets/{day}")
+def get_tickets(day: str):
+    """Genere les 3 tickets du jour (safe, medium, risky)."""
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC",
+        (day,),
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        return {"error": "Aucun match pour cette date"}
+
+    # 1. Genere un pick par match
+    all_picks = []
+    for r in rows:
+        m = dict(r)
+        pick = _build_pick_for_match(m)
+        if pick:
+            all_picks.append(pick)
+
+    if not all_picks:
+        return {"error": "Aucun pick disponible"}
+
+    # 2. Trie par cote croissante
+    all_picks.sort(key=lambda x: x["cote"])
+
+    # 3. Safe : 2 picks, cote ~2
+    safe = _select_for_target(all_picks, 2.0, 2, 3)
+    safe_ids = {p["match_id"] for p in safe}
+
+    # 4. Medium : 12-15 picks, cote ~120
+    remaining = [p for p in all_picks if p["match_id"] not in safe_ids]
+    medium = _select_for_target(remaining, 120.0, 12, 15)
+    medium_ids = {p["match_id"] for p in medium}
+
+    # 5. Risky : 25-35 picks, cote ~1500
+    remaining2 = [p for p in remaining if p["match_id"] not in medium_ids]
+    risky = _select_for_target(remaining2, 1500.0, 25, 35)
+
+    def _total_cote(picks):
+        c = 1.0
+        for p in picks:
+            c *= p["cote"]
+        return round(c, 2)
+
+    return {
+        "date": day,
+        "safe": {
+            "name": "Ticket Safe",
+            "total_cote": _total_cote(safe),
+            "count": len(safe),
+            "picks": safe,
+        },
+        "medium": {
+            "name": "Ticket Medium",
+            "total_cote": _total_cote(medium),
+            "count": len(medium),
+            "picks": medium,
+        },
+        "risky": {
+            "name": "Ticket Risky",
+            "total_cote": _total_cote(risky),
+            "count": len(risky),
+            "picks": risky,
+        },
+    }
+    
 
 @app.post("/refresh")
 async def manual_refresh():
