@@ -567,7 +567,7 @@ def _build_ticket(pool, target_cote, min_n, max_n):
 
 
 def _calc_risky_pick(m):
-    """Choisit LE MEILLEUR pick risky selon criteres metier."""
+    """Choisit le pick risky selon criteres metier, en preferant la cible ~1.80-2.20."""
     hw = m.get("home_win") or 0
     d = m.get("draw") or 0
     aw = m.get("away_win") or 0
@@ -584,32 +584,53 @@ def _calc_risky_pick(m):
     total_xg = m.get("total_xg") or 0
 
     candidates = []
+
+    # 1. V1 ou V2 si proba >= 75%
     if hw >= 0.75:
         candidates.append(("1", m["home"], hw, 1.0 / hw))
     if aw >= 0.75:
         candidates.append(("2", m["away"], aw, 1.0 / aw))
+
+    # 2. X si les 2 equipes faibles en attaque
     if home_xg < 1.3 and away_xg < 1.3 and hw < 0.40 and aw < 0.40 and d >= 0.28:
         candidates.append(("X", "Match nul", d, 1.0 / d))
+
+    # 3. Handicap -2 si favori largement superieur
     if hw > 0.70 and home_xg > 1.9 and away_xg < 1.0 and hcp2_home > 0.28:
         candidates.append(("H-2 D", "Handicap -2 " + m["home"], hcp2_home, 1.0 / hcp2_home))
     if aw > 0.70 and away_xg > 1.9 and home_xg < 1.0 and hcp2_away > 0.28:
         candidates.append(("H-2 E", "Handicap -2 " + m["away"], hcp2_away, 1.0 / hcp2_away))
+
+    # 4. +2.5 buts si cote 1.4-1.6
     if 0.62 <= over_25 <= 0.72:
         candidates.append(("+2.5", "+2.5 buts", over_25, 1.0 / over_25))
+
+    # 5. BTTS si cote 1.3-1.8
     if 0.55 <= btts <= 0.77:
         candidates.append(("BTTS", "Les 2 equipes marquent", btts, 1.0 / btts))
-    if total_xg > 3.5 and over_35 > 0.45:
+
+    # 6. +3.5 buts SEULEMENT si 2 attaques fortes (plus strict)
+    if total_xg > 3.8 and over_35 > 0.50:
         candidates.append(("+3.5", "+3.5 buts", over_35, 1.0 / over_35))
-    if fh_goal >= 0.60:
+
+    # 7. But en 1ere MT si probable
+    if fh_goal >= 0.65:
         candidates.append(("1MT", "But en 1ere MT", fh_goal, 1.0 / fh_goal))
-    if fh_over_15 >= 0.28:
+
+    # 8. +1.5 1ere MT SEULEMENT si match tres offensif (plus strict qu'avant)
+    if total_xg > 3.8 and fh_over_15 >= 0.45:
         candidates.append(("+1.5 1MT", "+1.5 buts 1ere MT", fh_over_15, 1.0 / fh_over_15))
+
+    # 9. -2.5 buts si match ferme
     if total_xg < 2.3 and under_25 > 0.55:
         candidates.append(("-2.5", "-2.5 buts", under_25, 1.0 / under_25))
 
     if not candidates:
         return None
-    best = max(candidates, key=lambda x: x[3])
+
+    # Prend la cote la PLUS PROCHE de 2.0 (compromis risque/gain)
+    best = min(candidates, key=lambda x: abs(x[3] - 2.0))
+
     return {
         "match_id": m["id"], "home": m["home"], "away": m["away"],
         "league": m["league"], "kickoff": m["kickoff"],
@@ -617,7 +638,6 @@ def _calc_risky_pick(m):
         "market": best[0], "description": best[1],
         "proba": round(best[2], 3), "cote": round(best[3], 2),
     }
-
 
 # ===== APP =====
 
@@ -773,54 +793,68 @@ def get_tickets(day: str):
     medium_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
     medium = _build_ticket(medium_pool, 120.0, 10, 15)
 
-    # RISKY : logique specifique
+       # RISKY : logique specifique avec diversification des marches
     risky_picks = []
     used_ids = set()
+    market_count = {}  # compte les marches utilises pour diversifier
+    MAX_PER_MARKET = 3  # max 3 picks du meme marche
+
     for r in rows:
         m = dict(r)
         pick = _calc_risky_pick(m)
-        if pick:
-            risky_picks.append(pick)
-            used_ids.add(m["id"])
+        if not pick:
+            continue
+        market = pick["market"]
+        # Verifie si le marche n'est pas sature
+        if market_count.get(market, 0) >= MAX_PER_MARKET:
+            continue
+        risky_picks.append(pick)
+        used_ids.add(m["id"])
+        market_count[market] = market_count.get(market, 0) + 1
 
-    if len(risky_picks) < 8:
+    # Si pas assez, complete avec picks classiques varies
+    if len(risky_picks) < 10:
         for r in rows:
             m = dict(r)
             if m["id"] in used_ids:
                 continue
             best_pick = None
-            best_cote = 0
+            best_dist = float('inf')
             for label, prob, desc in [
                 ("+2.5", m.get("over_25"), "+2.5 buts"),
                 ("+3.5", m.get("over_35"), "+3.5 buts"),
                 ("BTTS", m.get("btts_yes"), "Les 2 equipes marquent"),
                 ("1MT", m.get("first_half_goal"), "But en 1ere MT"),
                 ("+1.5 1MT", m.get("first_half_over_15"), "+1.5 buts 1ere MT"),
+                ("-2.5", m.get("under_25"), "-2.5 buts"),
+                ("H-2 D", m.get("handicap_home_minus2"), "Handicap -2 " + m["home"]),
+                ("H-2 E", m.get("handicap_away_minus2"), "Handicap -2 " + m["away"]),
             ]:
-                if prob and 0.42 <= prob <= 0.75:
+                if prob and 0.35 <= prob <= 0.80:
+                    market = label
+                    if market_count.get(market, 0) >= MAX_PER_MARKET:
+                        continue
                     cote = 1.0 / prob
-                    if cote > best_cote:
-                        best_cote = cote
+                    if cote < 1.30 or cote > 3.5:
+                        continue
+                    dist = abs(cote - 2.0)
+                    if dist < best_dist:
+                        best_dist = dist
                         best_pick = {
                             "match_id": m["id"], "home": m["home"], "away": m["away"],
                             "league": m["league"], "kickoff": m["kickoff"],
                             "home_logo": m["home_logo"], "away_logo": m["away_logo"],
-                            "market": label, "description": desc,
+                            "market": market, "description": desc,
                             "proba": round(prob, 3), "cote": round(cote, 2),
                         }
             if best_pick:
                 risky_picks.append(best_pick)
                 used_ids.add(m["id"])
+                mk = best_pick["market"]
+                market_count[mk] = market_count.get(mk, 0) + 1
 
-    risky = _build_ticket(risky_picks, 1500.0, 6, 20)
-
-    return {
-        "date": day,
-        "safe": {"name": "Ticket Safe", "total_cote": _calc_total_cote(safe), "count": len(safe), "picks": safe},
-        "medium": {"name": "Ticket Medium", "total_cote": _calc_total_cote(medium), "count": len(medium), "picks": medium},
-        "risky": {"name": "Ticket Risky", "total_cote": _calc_total_cote(risky), "count": len(risky), "picks": risky},
-    }
-
+    # Construit le ticket en visant 1500
+    risky = _build_ticket(risky_picks, 1500.0, 8, 20)
 
 # ===== PREDICTIONS JUSTES =====
 
