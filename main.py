@@ -55,6 +55,7 @@ def init_db():
             home_logo TEXT, away_logo TEXT,
             kickoff TEXT, status TEXT,
             home_goals INTEGER, away_goals INTEGER,
+            ht_home_goals INTEGER, ht_away_goals INTEGER,
             home_win REAL, draw REAL, away_win REAL,
             over_15 REAL, under_15 REAL,
             over_25 REAL, under_25 REAL,
@@ -404,6 +405,8 @@ async def daily_pipeline():
             status = m.get("status", "SCHEDULED")
             home_goals = m.get("score", {}).get("fullTime", {}).get("home")
             away_goals = m.get("score", {}).get("fullTime", {}).get("away")
+            ht_home = m.get("score", {}).get("halfTime", {}).get("home")
+            ht_away = m.get("score", {}).get("halfTime", {}).get("away")
 
             home_xg, away_xg = calc_expected_goals(code)
             pred = predict_all_markets(home_xg, away_xg)
@@ -416,7 +419,7 @@ async def daily_pipeline():
                 """
                 INSERT OR REPLACE INTO matches
                 (id, league, country, home, away, home_logo, away_logo,
-                 kickoff, status, home_goals, away_goals,
+                 kickoff, status, home_goals, away_goals,ht_home_goals, ht_away_goals,
                  home_win, draw, away_win, over_15, under_15, over_25, under_25,
                  over_35, under_35, over_45, under_45, btts_yes, btts_no,
                  first_half_goal, handicap_home_1, handicap_away_1,
@@ -431,12 +434,12 @@ async def daily_pipeline():
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     match_id, league, country, home, away,
                     logos.get(home, ""), logos.get(away, ""),
-                    kickoff, status, home_goals, away_goals,
+                    kickoff, status, home_goals, away_goals,ht_home, ht_away,
                     pred["home_win"], pred["draw"], pred["away_win"],
                     pred["over_15"], pred["under_15"],
                     pred["over_25"], pred["under_25"],
@@ -566,7 +569,123 @@ def _build_ticket(pool, target_cote, min_n, max_n):
             best = combo
     return best
 
+def _evaluate_pick(pick, match):
+    """Evalue un pick selon l'etat actuel du match."""
+    market = pick.get("market", "")
+    status = match.get("status", "")
+    hg = match.get("home_goals")
+    ag = match.get("away_goals")
+    ht_hg = match.get("ht_home_goals")
+    ht_ag = match.get("ht_away_goals")
 
+    if status in ["SCHEDULED", "TIMED"]:
+        return {"result": "pending", "reason": "Match pas encore commence", "current_score": None}
+
+    if status in ["IN_PLAY", "PAUSED"]:
+        score_txt = str(hg) + "-" + str(ag) if hg is not None and ag is not None else "0-0"
+        return {"result": "pending", "reason": "En cours " + score_txt, "current_score": score_txt}
+
+    if status != "FINISHED":
+        return {"result": "pending", "reason": "Statut inconnu", "current_score": None}
+
+    if hg is None or ag is None:
+        return {"result": "pending", "reason": "Score indisponible", "current_score": None}
+
+    total = hg + ag
+    won = False
+    reason = ""
+
+    if market == "1":
+        won = hg > ag
+        reason = str(hg) + "-" + str(ag) + (" victoire dom." if won else " defaite dom.")
+    elif market == "X":
+        won = hg == ag
+        reason = "Score " + str(hg) + "-" + str(ag) + (" nul" if won else " pas nul")
+    elif market == "2":
+        won = hg < ag
+        reason = str(hg) + "-" + str(ag) + (" victoire ext." if won else " defaite ext.")
+    elif market == "+0.5":
+        won = total > 0
+        reason = str(total) + " but(s) au total"
+    elif market == "+1.5":
+        won = total > 1
+        reason = str(total) + " but(s) au total (min 2)"
+    elif market == "+2.5":
+        won = total > 2
+        reason = str(total) + " but(s) au total (min 3)"
+    elif market == "+3.5":
+        won = total > 3
+        reason = str(total) + " but(s) au total (min 4)"
+    elif market == "-2.5":
+        won = total < 3
+        reason = str(total) + " but(s) au total (max 2)"
+    elif market == "-3.5":
+        won = total < 4
+        reason = str(total) + " but(s) au total (max 3)"
+    elif market == "-4.5":
+        won = total < 5
+        reason = str(total) + " but(s) au total (max 4)"
+    elif market == "BTTS":
+        won = hg > 0 and ag > 0
+        reason = "Score " + str(hg) + "-" + str(ag) + (" les 2 marquent" if won else " pas les 2")
+    elif market == "1MT":
+        if ht_hg is None or ht_ag is None:
+            return {"result": "pending", "reason": "Mi-temps indisponible", "current_score": str(hg) + "-" + str(ag)}
+        won = (ht_hg + ht_ag) > 0
+        reason = "Mi-temps " + str(ht_hg) + "-" + str(ht_ag) + (" but oui" if won else " 0-0")
+    elif market == "+1.5 1MT":
+        if ht_hg is None or ht_ag is None:
+            return {"result": "pending", "reason": "Mi-temps indisponible", "current_score": str(hg) + "-" + str(ag)}
+        won = (ht_hg + ht_ag) > 1
+        reason = "Mi-temps " + str(ht_hg) + "-" + str(ht_ag) + " (" + str(ht_hg + ht_ag) + " buts)"
+    elif market == "1X":
+        won = hg >= ag
+        reason = "Score " + str(hg) + "-" + str(ag) + (" dom. ou nul" if won else " defaite dom.")
+    elif market == "12":
+        won = hg != ag
+        reason = "Score " + str(hg) + "-" + str(ag) + (" pas nul" if won else " match nul")
+    elif market == "X2":
+        won = hg <= ag
+        reason = "Score " + str(hg) + "-" + str(ag) + (" ext. ou nul" if won else " victoire dom.")
+    elif market == "DNB D":
+        won = hg > ag
+        reason = "Score " + str(hg) + "-" + str(ag)
+    elif market == "DNB E":
+        won = hg < ag
+        reason = "Score " + str(hg) + "-" + str(ag)
+    elif market == "H-1 D":
+        won = hg - ag >= 2
+        reason = "Ecart " + str(hg - ag) + " (min 2)"
+    elif market == "H-1 E":
+        won = ag - hg >= 2
+        reason = "Ecart " + str(ag - hg) + " (min 2)"
+    elif market == "H-2 D":
+        won = hg - ag >= 3
+        reason = "Ecart " + str(hg - ag) + " (min 3)"
+    elif market == "H-2 E":
+        won = ag - hg >= 3
+        reason = "Ecart " + str(ag - hg) + " (min 3)"
+    elif market == "H+1 D":
+        won = hg - ag >= -1
+        reason = "Ecart " + str(hg - ag) + " (min -1)"
+    elif market == "H+1 E":
+        won = ag - hg >= -1
+        reason = "Ecart " + str(ag - hg) + " (min -1)"
+    elif market == "Dom. marque":
+        won = hg > 0
+        reason = "Dom. " + str(hg) + " but(s)"
+    elif market == "Ext. marque":
+        won = ag > 0
+        reason = "Ext. " + str(ag) + " but(s)"
+    else:
+        return {"result": "pending", "reason": "Marche non evaluable", "current_score": str(hg) + "-" + str(ag)}
+
+    return {
+        "result": "won" if won else "lost",
+        "reason": reason,
+        "current_score": str(hg) + "-" + str(ag),
+    }
+    
 def _calc_risky_pick(m):
     """Choisit le pick risky selon criteres metier, en preferant la cible ~1.80-2.20."""
     hw = m.get("home_win") or 0
@@ -769,7 +888,7 @@ def get_leagues():
 
 @app.get("/tickets/{day}")
 def get_tickets(day: str):
-    """Genere les 3 tickets. Ne renvoie JAMAIS null."""
+    """Genere les 3 tickets avec evaluation gagne/perdu/en attente."""
     try:
         conn = db()
         rows = conn.execute(
@@ -795,9 +914,7 @@ def get_tickets(day: str):
         # SAFE
         try:
             safe = _build_ticket(all_picks, 2.0, 2, 3)
-            if safe is None:
-                safe = []
-            if not isinstance(safe, list):
+            if safe is None or not isinstance(safe, list):
                 safe = []
         except Exception:
             safe = []
@@ -808,9 +925,7 @@ def get_tickets(day: str):
         try:
             medium_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
             medium = _build_ticket(medium_pool, 120.0, 10, 15)
-            if medium is None:
-                medium = []
-            if not isinstance(medium, list):
+            if medium is None or not isinstance(medium, list):
                 medium = []
         except Exception:
             medium = []
@@ -838,7 +953,6 @@ def get_tickets(day: str):
                 used_ids.add(m["id"])
                 market_count[mk] = market_count.get(mk, 0) + 1
 
-            # Fallback si < 8
             if len(risky_picks) < 8:
                 for r in rows:
                     m = dict(r)
@@ -880,7 +994,6 @@ def get_tickets(day: str):
                         mk = best_pick["market"]
                         market_count[mk] = market_count.get(mk, 0) + 1
 
-            # Dernier fallback
             if len(risky_picks) < 3:
                 for r in rows:
                     m = dict(r)
@@ -897,7 +1010,6 @@ def get_tickets(day: str):
                         })
                         used_ids.add(m["id"])
 
-            # Construit
             risky_result = _build_ticket(risky_picks, 1500.0, 3, 20)
             if risky_result is None or not isinstance(risky_result, list):
                 risky_result = risky_picks[:15] if risky_picks else []
@@ -906,7 +1018,34 @@ def get_tickets(day: str):
             print(f"Erreur risky: {e}")
             risky_list = []
 
-        # Construction finale - JAMAIS null
+        # === ENRICHISSEMENT : evaluation de chaque pick ===
+        match_map = {dict(r)["id"]: dict(r) for r in rows}
+
+        def enrich_picks(picks):
+            for p in picks:
+                match = match_map.get(p["match_id"])
+                if match:
+                    try:
+                        ev = _evaluate_pick(p, match)
+                        p["result"] = ev["result"]
+                        p["reason"] = ev["reason"]
+                        p["current_score"] = ev["current_score"]
+                        p["match_status"] = match.get("status")
+                        p["kickoff"] = match.get("kickoff")
+                    except Exception:
+                        p["result"] = "pending"
+                        p["reason"] = "Erreur evaluation"
+                        p["current_score"] = None
+                else:
+                    p["result"] = "pending"
+                    p["reason"] = "Match introuvable"
+                    p["current_score"] = None
+            return picks
+
+        safe = enrich_picks(safe)
+        medium = enrich_picks(medium)
+        risky_list = enrich_picks(risky_list)
+
         def safe_cote(lst):
             try:
                 return _calc_total_cote(lst) if lst else 1.0
