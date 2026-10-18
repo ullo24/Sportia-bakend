@@ -999,6 +999,46 @@ def get_tickets(day: str):
         },
     }
 
+@app.get("/debug-picks/{day}")
+def debug_picks(day: str):
+    """Liste TOUS les picks disponibles pour une date (debug)."""
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM matches WHERE date(kickoff)=?", (day,)
+    ).fetchall()
+    conn.close()
+
+    result = []
+    for r in rows:
+        m = dict(r)
+        picks = _all_picks_for_match(m)
+        result.append({
+            "match": m["home"] + " vs " + m["away"],
+            "picks_count": len(picks),
+            "cotes": sorted([p["cote"] for p in picks]),
+        })
+
+    # Stats globales
+    all_cotes = []
+    for r in result:
+        all_cotes.extend(r["cotes"])
+
+    return {
+        "total_matches": len(rows),
+        "total_picks": len(all_cotes),
+        "cote_min": min(all_cotes) if all_cotes else None,
+        "cote_max": max(all_cotes) if all_cotes else None,
+        "cote_moyenne": round(sum(all_cotes) / len(all_cotes), 2) if all_cotes else None,
+        "distribution": {
+            "1.20-1.40": len([c for c in all_cotes if 1.20 <= c < 1.40]),
+            "1.40-1.60": len([c for c in all_cotes if 1.40 <= c < 1.60]),
+            "1.60-1.80": len([c for c in all_cotes if 1.60 <= c < 1.80]),
+            "1.80-2.00": len([c for c in all_cotes if 1.80 <= c < 2.00]),
+            "2.00-2.50": len([c for c in all_cotes if 2.00 <= c < 2.50]),
+        },
+        "per_match": result[:3],  # 3 exemples
+    }
+
 @app.post("/refresh")
 async def manual_refresh():
     await daily_pipeline()
