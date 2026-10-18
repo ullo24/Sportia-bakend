@@ -662,8 +662,9 @@ async def get_live_scores(day: str, refresh: bool = False):
 # ===== TICKETS DU JOUR =====
 
 def _build_pick_for_match(m):
-    """Choisit le meilleur pick pour un match (cote proche de 1.35)."""
+    """Choisit le meilleur pick parmi TOUS les marchés (15+)."""
     markets = [
+        # Marchés de base
         ("1", m["home_win"], m["home"]),
         ("X", m["draw"], "Match nul"),
         ("2", m["away_win"], m["away"]),
@@ -673,11 +674,27 @@ def _build_pick_for_match(m):
         ("-4.5", m["under_45"], "-4.5 buts"),
         ("BTTS", m["btts_yes"], "Les 2 equipes marquent"),
         ("1MT", m["first_half_goal"], "But en 1ere MT"),
+        # Nouveaux marchés
+        ("1X", m.get("dc_1x"), "Double Chance 1X"),
+        ("12", m.get("dc_12"), "Double Chance 12"),
+        ("X2", m.get("dc_x2"), "Double Chance X2"),
+        ("DNB D", m.get("dnb_home"), "Draw No Bet Domicile"),
+        ("DNB E", m.get("dnb_away"), "Draw No Bet Extérieur"),
+        ("+0.5", m.get("over_05"), "Over 0.5 but"),
+        ("BTTS+2.5", m.get("btts_over_25"), "BTTS & Over 2.5"),
+        ("BTTS-3.5", m.get("btts_under_35"), "BTTS & Under 3.5"),
+        ("H -1 D", m.get("handicap_home_minus1"), "Handicap -1 Domicile"),
+        ("H -1 E", m.get("handicap_away_minus1"), "Handicap -1 Extérieur"),
+        ("H +1 D", m.get("handicap_home_plus1"), "Handicap +1 Domicile"),
+        ("H +1 E", m.get("handicap_away_plus1"), "Handicap +1 Extérieur"),
+        ("Dom. marque", m.get("home_scores"), "Domicile marque"),
+        ("Ext. marque", m.get("away_scores"), "Extérieur marque"),
     ]
+    
     best = None
     best_dist = 999
     for label, prob, desc in markets:
-        if prob < 0.50:
+        if prob is None or prob < 0.45:
             continue
         cote = 1.0 / prob
         dist = abs(cote - 1.35)
