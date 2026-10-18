@@ -37,6 +37,18 @@ LEAGUE_AVG_GOALS = {
 DAYS_AHEAD = 7
 HOME_ADVANTAGE = 1.18
 FREE_MATCHES_PER_DAY = 2
+# Top teams par ligue pour le ticket semaine
+LEAGUE_TOP_N = {
+    "PL": 5,   # Premier League
+    "PD": 4,   # La Liga
+    "FL1": 4,  # Ligue 1
+    "DED": 4,  # Eredivisie
+    "BL1": 5,  # Bundesliga
+    "PPL": 4,  # Liga Portugal
+}
+
+# Cache 24h des standings
+_STANDINGS_CACHE = {}
 MIGRATE_DB = False  # ⚠️ Passer a False apres le premier refresh reussi
 
 
@@ -568,6 +580,42 @@ def _build_ticket(pool, target_cote, min_n, max_n):
             best_diff = diff
             best = combo
     return best
+
+async def fetch_top_teams(code: str, top_n: int):
+    """Recupere les N premiers noms d'equipes d'un championnat (cache 24h)."""
+    cached = _STANDINGS_CACHE.get(code)
+    if cached:
+        age = (datetime.now() - cached["timestamp"]).total_seconds()
+        if age < 86400:
+            return cached["top_teams"]
+
+    url = BASE_URL + "/competitions/" + code + "/standings"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(url, headers=HEADERS)
+            increment_count()
+            if r.status_code != 200:
+                print("Erreur standings " + code + " : " + str(r.status_code))
+                return []
+            data = r.json()
+            standings = data.get("standings", [])
+            for s in standings:
+                if s.get("type") == "TOTAL":
+                    table = s.get("table", [])
+                    top_teams = []
+                    for row in table[:top_n]:
+                        team_name = row.get("team", {}).get("name", "")
+                        if team_name:
+                            top_teams.append(team_name)
+                    _STANDINGS_CACHE[code] = {
+                        "timestamp": datetime.now(),
+                        "top_teams": top_teams,
+                    }
+                    print("Top " + str(top_n) + " " + code + " : " + str(top_teams))
+                    return top_teams
+    except Exception as e:
+        print("Exception standings " + code + " : " + str(e))
+    return []
 
 def _evaluate_pick(pick, match):
     """Evalue un pick selon l'etat actuel du match."""
@@ -1243,6 +1291,155 @@ async def get_live_scores(day: str, refresh: bool = False):
     return all_results
 
 # Force redeploy 2026-10-18 22:00
+@app.get("/tickets-week")
+async def get_tickets_week():
+    """Ticket risky de la semaine, base uniquement sur les top equipes."""
+    today = date.today()
+    week_later = (today + timedelta(days=7)).isoformat()
+
+    # 1. Recupere les top equipes de chaque ligue
+    top_teams_by_league = {}
+    for code, top_n in LEAGUE_TOP_N.items():
+        teams = await fetch_top_teams(code, top_n)
+        top_teams_by_league[code] = set(teams)
+
+    if not any(top_teams_by_league.values()):
+        return {"error": "Standings indisponibles"}
+
+    # 2. Filtre les matchs de la semaine
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM matches WHERE date(kickoff) BETWEEN ? AND ? ORDER BY kickoff ASC",
+        (today.isoformat(), week_later),
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        return {"error": "Aucun match cette semaine"}
+
+    # 3. Garde uniquement les matchs avec au moins une equipe top
+    eligible = []
+    for r in rows:
+        m = dict(r)
+        league_name = m.get("league", "")
+        code = None
+        for c, name in COMPETITIONS.items():
+            if name == league_name:
+                code = c
+                break
+        if not code or code not in top_teams_by_league:
+            continue
+        top_teams = top_teams_by_league[code]
+        home_top = m.get("home", "") in top_teams
+        away_top = m.get("away", "") in top_teams
+        if not home_top and not away_top:
+            continue
+        m["_code"] = code
+        m["_home_top"] = home_top
+        m["_away_top"] = away_top
+        eligible.append(m)
+
+    if not eligible:
+        return {"error": "Aucun match avec equipe top cette semaine"}
+
+    # 4. Pour chaque match, prend le pick safe le plus pertinent
+    week_picks = []
+    for m in eligible:
+        home_top = m["_home_top"]
+        away_top = m["_away_top"]
+        candidates = []
+
+        hw = m.get("home_win") or 0
+        aw = m.get("away_win") or 0
+        dc_1x = m.get("dc_1x") or 0
+        dc_x2 = m.get("dc_x2") or 0
+        dnb_home = m.get("dnb_home") or 0
+        dnb_away = m.get("dnb_away") or 0
+        home_scores = m.get("home_scores") or 0
+        away_scores = m.get("away_scores") or 0
+        over_15 = m.get("over_15") or 0
+
+        # 1 ou 2 : l'equipe top gagne
+        if home_top and hw >= 0.50:
+            candidates.append(("1", m["home"], hw))
+        if away_top and aw >= 0.50:
+            candidates.append(("2", m["away"], aw))
+
+        # Double chance
+        if home_top and dc_1x >= 0.65:
+            candidates.append(("1X", "Double Chance 1X", dc_1x))
+        if away_top and dc_x2 >= 0.65:
+            candidates.append(("X2", "Double Chance X2", dc_x2))
+
+        # DNB
+        if home_top and dnb_home >= 0.62:
+            candidates.append(("DNB D", "Draw No Bet Domicile", dnb_home))
+        if away_top and dnb_away >= 0.62:
+            candidates.append(("DNB E", "Draw No Bet Exterieur", dnb_away))
+
+        # Equipe top marque
+        if home_top and home_scores >= 0.80:
+            candidates.append(("Dom. marque", "Domicile marque", home_scores))
+        if away_top and away_scores >= 0.80:
+            candidates.append(("Ext. marque", "Exterieur marque", away_scores))
+
+        # Over 1.5
+        if over_15 >= 0.78:
+            candidates.append(("+1.5", "+1.5 buts", over_15))
+
+        if not candidates:
+            continue
+
+        # Prend la cote la plus proche de 1.40 (safe type)
+        best = min(candidates, key=lambda x: abs((1.0 / x[2]) - 1.40))
+        cote = 1.0 / best[2]
+
+        if cote < 1.20 or cote > 1.65:
+            continue
+
+        week_picks.append({
+            "match_id": m["id"], "home": m["home"], "away": m["away"],
+            "league": m["league"], "kickoff": m["kickoff"],
+            "home_logo": m["home_logo"], "away_logo": m["away_logo"],
+            "market": best[0], "description": best[1],
+            "proba": round(best[2], 3), "cote": round(cote, 2),
+        })
+
+    if not week_picks:
+        return {"error": "Aucun pick safe trouve"}
+
+    # 5. Construit le ticket (cible 1500)
+    week_ticket = _build_ticket(week_picks, 1500.0, 5, 25)
+
+    # 6. Enrichit avec evaluation (gagne/perdu/en attente)
+    match_map = {dict(r)["id"]: dict(r) for r in rows}
+    for p in week_ticket:
+        match = match_map.get(p["match_id"])
+        if match:
+            try:
+                ev = _evaluate_pick(p, match)
+                p["result"] = ev["result"]
+                p["reason"] = ev["reason"]
+                p["current_score"] = ev["current_score"]
+                p["match_status"] = match.get("status")
+            except Exception:
+                p["result"] = "pending"
+                p["reason"] = "Erreur evaluation"
+                p["current_score"] = None
+        else:
+            p["result"] = "pending"
+            p["reason"] = "Match introuvable"
+            p["current_score"] = None
+
+    return {
+        "week_start": today.isoformat(),
+        "week_end": week_later,
+        "total_eligible_matches": len(eligible),
+        "total_picks": len(week_ticket),
+        "total_cote": _calc_total_cote(week_ticket) if week_ticket else 1.0,
+        "picks": week_ticket,
+        "top_teams": {code: list(teams) for code, teams in top_teams_by_league.items()},
+    }
 
 @app.post("/refresh")
 async def manual_refresh():
