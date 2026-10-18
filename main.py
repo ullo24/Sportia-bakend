@@ -66,6 +66,21 @@ def init_db():
             updated_at TEXT
         )
     """)
+    # Dans init_db(), après les colonnes existantes :
+c.execute("""
+    CREATE TABLE IF NOT EXISTS matches (
+        ... -- colonnes existantes
+        dc_1x REAL, dc_12 REAL, dc_x2 REAL,
+        dnb_home REAL, dnb_away REAL,
+        over_05 REAL, under_05 REAL,
+        btts_over_25 REAL, btts_under_35 REAL,
+        handicap_home_minus1 REAL, handicap_away_minus1 REAL,
+        handicap_home_plus1 REAL, handicap_away_plus1 REAL,
+        exact_scores TEXT,  -- JSON string
+        home_scores REAL, away_scores REAL,
+        updated_at TEXT
+    )
+""")
     c.execute("CREATE TABLE IF NOT EXISTS api_log (day TEXT PRIMARY KEY, count INTEGER)")
     c.execute("CREATE TABLE IF NOT EXISTS team_logos (team TEXT PRIMARY KEY, logo TEXT)")
     conn.commit()
@@ -218,6 +233,106 @@ def predict_all_markets(home_xg: float, away_xg: float) -> dict:
         "confidence": round(confidence, 2),
     }
 
+def predict_extended_markets(home_xg: float, away_xg: float, home_win: float, draw: float, away_win: float) -> dict:
+    """
+    Calcule les probabilités pour 15 marchés de paris populaires.
+    Prend en entrée les probabilités de base déjà calculées par predict_all_markets.
+    """
+    MAX_GOALS = 8  # Réduit pour la performance
+    score_probs = {}
+    for h in range(MAX_GOALS + 1):
+        p_h = poisson_prob(h, home_xg)
+        for a in range(MAX_GOALS + 1):
+            p_a = poisson_prob(a, away_xg)
+            score_probs[(h, a)] = p_h * p_a
+
+    # 1. Double Chance
+    dc_1x = home_win + draw
+    dc_12 = home_win + away_win
+    dc_x2 = draw + away_win
+
+    # 2. Draw No Bet (remboursé si nul)
+    dnb_home = home_win / (home_win + away_win) if (home_win + away_win) > 0 else 0
+    dnb_away = away_win / (home_win + away_win) if (home_win + away_win) > 0 else 0
+
+    # 3. Over/Under 0.5
+    over_05 = 1 - score_probs.get((0, 0), 0)
+    under_05 = score_probs.get((0, 0), 0)
+
+    # 4. Distribution des totaux (pour over/under déjà existants)
+    total_dist = {}
+    for (h, a), p in score_probs.items():
+        t = h + a
+        total_dist[t] = total_dist.get(t, 0) + p
+
+    def over(line):
+        return sum(p for t, p in total_dist.items() if t > line)
+
+    over_15 = over(1.5)
+    over_25 = over(2.5)
+    over_35 = over(3.5)
+    over_45 = over(4.5)
+
+    # 5. BTTS
+    btts_yes = (1 - poisson_prob(0, home_xg)) * (1 - poisson_prob(0, away_xg))
+
+    # 6. BTTS & Over 2.5
+    btts_over_25 = sum(p for (h, a), p in score_probs.items()
+                       if h > 0 and a > 0 and (h + a) > 2.5)
+
+    # 7. BTTS & Under 3.5
+    btts_under_35 = sum(p for (h, a), p in score_probs.items()
+                        if h > 0 and a > 0 and (h + a) < 3.5)
+
+    # 8. Handicap -1 (gagne par 2+ buts)
+    handicap_home_minus1 = sum(p for (h, a), p in score_probs.items() if h - a >= 2)
+    handicap_away_minus1 = sum(p for (h, a), p in score_probs.items() if a - h >= 2)
+
+    # 9. Handicap +1 (perd par 1 max ou gagne)
+    handicap_home_plus1 = sum(p for (h, a), p in score_probs.items() if h - a >= -1)
+    handicap_away_plus1 = sum(p for (h, a), p in score_probs.items() if a - h >= -1)
+
+    # 10. But en 1ère MT
+    total_xg = home_xg + away_xg
+    first_half_goal = 1 - math.exp(-0.45 * total_xg)
+
+    # 11. Score exact (les 3 plus probables)
+    top_scores = sorted(score_probs.items(), key=lambda x: x[1], reverse=True)[:3]
+    exact_scores = [{"score": f"{h}-{a}", "prob": round(p, 3)} for (h, a), p in top_scores]
+
+    # 12. Équipe marque (domicile / extérieur)
+    home_scores = 1 - poisson_prob(0, home_xg)
+    away_scores = 1 - poisson_prob(0, away_xg)
+
+    return {
+        "dc_1x": round(dc_1x, 3),
+        "dc_12": round(dc_12, 3),
+        "dc_x2": round(dc_x2, 3),
+        "dnb_home": round(dnb_home, 3),
+        "dnb_away": round(dnb_away, 3),
+        "over_05": round(over_05, 3),
+        "under_05": round(under_05, 3),
+        "over_15": round(over_15, 3),
+        "under_15": round(1 - over_15, 3),
+        "over_25": round(over_25, 3),
+        "under_25": round(1 - over_25, 3),
+        "over_35": round(over_35, 3),
+        "under_35": round(1 - over_35, 3),
+        "over_45": round(over_45, 3),
+        "under_45": round(1 - over_45, 3),
+        "btts_yes": round(btts_yes, 3),
+        "btts_no": round(1 - btts_yes, 3),
+        "btts_over_25": round(btts_over_25, 3),
+        "btts_under_35": round(btts_under_35, 3),
+        "handicap_home_minus1": round(handicap_home_minus1, 3),
+        "handicap_away_minus1": round(handicap_away_minus1, 3),
+        "handicap_home_plus1": round(handicap_home_plus1, 3),
+        "handicap_away_plus1": round(handicap_away_plus1, 3),
+        "first_half_goal": round(first_half_goal, 3),
+        "exact_scores": exact_scores,
+        "home_scores": round(home_scores, 3),
+        "away_scores": round(away_scores, 3),
+    }
 
 def generate_analysis(match: dict) -> str:
     home = match["home"]
@@ -317,6 +432,7 @@ async def daily_pipeline():
 
             home_xg, away_xg = calc_expected_goals(code)
             pred = predict_all_markets(home_xg, away_xg)
+            ext = predict_extended_markets(home_xg, away_xg, pred["home_win"], pred["draw"], pred["away_win"])
 
             conn.execute(
                 """
@@ -474,9 +590,15 @@ def match_detail(match_id: int):
     if not row:
         raise HTTPException(404, "Match introuvable")
     m = dict(row)
+    # Convertit la chaîne JSON des scores exacts en liste
+    if m.get("exact_scores"):
+        try:
+            import json
+            m["exact_scores"] = json.loads(m["exact_scores"])
+        except:
+            m["exact_scores"] = []
     m["analysis"] = generate_analysis(m)
     return m
-
 
 @app.get("/leagues")
 def get_leagues():
