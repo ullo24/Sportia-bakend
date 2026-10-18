@@ -1052,6 +1052,172 @@ def debug_picks(day: str):
         "per_match": result[:3],  # 3 exemples
     }
 
+# ===== PREDICTIONS JUSTES =====
+
+def _check_won_markets(m):
+    """Verifie quels marches predits se sont averes gagnants."""
+    if m.get("status") != "FINISHED":
+        return []
+    hg = m.get("home_goals")
+    ag = m.get("away_goals")
+    if hg is None or ag is None:
+        return []
+
+    total = hg + ag
+    won = []
+
+    def add(label, desc, prob):
+        if prob is None or prob < 0.55:
+            return
+        won.append({
+            "market": label,
+            "description": desc,
+            "proba": round(prob, 3),
+            "cote": round(1.0 / prob, 2) if prob > 0 else None,
+        })
+
+    # 1X2
+    if hg > ag:
+        add("1", m["home"], m.get("home_win", 0))
+    elif hg == ag:
+        add("X", "Match nul", m.get("draw", 0))
+    else:
+        add("2", m["away"], m.get("away_win", 0))
+
+    # Over/Under
+    if total > 0.5:
+        add("+0.5", "Over 0.5 but", m.get("over_05", 0))
+    if total > 1.5:
+        add("+1.5", "+1.5 buts", m.get("over_15", 0))
+    if total > 2.5:
+        add("+2.5", "+2.5 buts", m.get("over_25", 0))
+    if total < 3.5:
+        add("-3.5", "-3.5 buts", m.get("under_35", 0))
+    if total < 4.5:
+        add("-4.5", "-4.5 buts", m.get("under_45", 0))
+
+    # BTTS
+    if hg > 0 and ag > 0:
+        add("BTTS", "Les 2 marquent", m.get("btts_yes", 0))
+        if total > 2.5:
+            add("BTTS+2.5", "BTTS & Over 2.5", m.get("btts_over_25", 0))
+        if total < 3.5:
+            add("BTTS-3.5", "BTTS & Under 3.5", m.get("btts_under_35", 0))
+
+    # Double Chance
+    if hg >= ag:
+        add("1X", "Double Chance 1X", m.get("dc_1x", 0))
+    if hg != ag:
+        add("12", "Double Chance 12", m.get("dc_12", 0))
+    if hg <= ag:
+        add("X2", "Double Chance X2", m.get("dc_x2", 0))
+
+    # Draw No Bet
+    if hg > ag:
+        add("DNB D", "Draw No Bet Domicile", m.get("dnb_home", 0))
+    elif hg < ag:
+        add("DNB E", "Draw No Bet Exterieur", m.get("dnb_away", 0))
+
+    # Handicaps
+    if hg - ag >= 2:
+        add("H-1 D", "Handicap -1 Domicile", m.get("handicap_home_minus1", 0))
+    if ag - hg >= 2:
+        add("H-1 E", "Handicap -1 Exterieur", m.get("handicap_away_minus1", 0))
+    if hg - ag >= -1:
+        add("H+1 D", "Handicap +1 Domicile", m.get("handicap_home_plus1", 0))
+    if ag - hg >= -1:
+        add("H+1 E", "Handicap +1 Exterieur", m.get("handicap_away_plus1", 0))
+
+    # Equipes marquent
+    if hg > 0:
+        add("Dom. marque", "Domicile marque", m.get("home_scores", 0))
+    if ag > 0:
+        add("Ext. marque", "Exterieur marque", m.get("away_scores", 0))
+
+    return won
+
+
+@app.get("/predictions/won/{day}")
+def get_won_predictions(day: str):
+    """Retourne les matchs termines avec leurs predictions gagnantes."""
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM matches WHERE date(kickoff)=? AND status='FINISHED' "
+        "ORDER BY kickoff ASC",
+        (day,),
+    ).fetchall()
+    conn.close()
+
+    result = []
+    total_won = 0
+    for r in rows:
+        m = dict(r)
+        won = _check_won_markets(m)
+        if won:
+            total_won += len(won)
+            result.append({
+                "id": m["id"],
+                "home": m["home"],
+                "away": m["away"],
+                "home_logo": m["home_logo"],
+                "away_logo": m["away_logo"],
+                "league": m["league"],
+                "kickoff": m["kickoff"],
+                "home_goals": m["home_goals"],
+                "away_goals": m["away_goals"],
+                "won_markets": won,
+                "count": len(won),
+            })
+
+    return {
+        "date": day,
+        "total_finished": len(rows),
+        "total_won_predictions": total_won,
+        "matches": result,
+    }
+
+
+@app.get("/predictions/won-week")
+def get_won_predictions_week():
+    """Retourne les predictions gagnantes des 7 derniers jours."""
+    today = date.today()
+    week_ago = (today - timedelta(days=7)).isoformat()
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM matches WHERE date(kickoff) BETWEEN ? AND ? "
+        "AND status='FINISHED' ORDER BY kickoff DESC",
+        (week_ago, today.isoformat()),
+    ).fetchall()
+    conn.close()
+
+    by_day = {}
+    total_won = 0
+    for r in rows:
+        m = dict(r)
+        won = _check_won_markets(m)
+        if won:
+            total_won += len(won)
+            day_key = m["kickoff"][:10]
+            by_day.setdefault(day_key, []).append({
+                "id": m["id"],
+                "home": m["home"],
+                "away": m["away"],
+                "home_logo": m["home_logo"],
+                "away_logo": m["away_logo"],
+                "league": m["league"],
+                "kickoff": m["kickoff"],
+                "home_goals": m["home_goals"],
+                "away_goals": m["away_goals"],
+                "won_markets": won,
+                "count": len(won),
+            })
+
+    return {
+        "total_won_predictions": total_won,
+        "total_finished": len(rows),
+        "days": by_day,
+    }
+
 @app.post("/refresh")
 async def manual_refresh():
     await daily_pipeline()
