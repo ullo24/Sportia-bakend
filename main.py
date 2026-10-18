@@ -694,7 +694,7 @@ def get_leagues():
 
 @app.get("/tickets/{day}")
 def get_tickets(day: str):
-    """Genere les 3 tickets du jour (safe, medium, risky)."""
+    """Genere les 3 tickets du jour : cotes 1.20-1.80, 1 pick par match."""
     conn = db()
     rows = conn.execute(
         "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)
@@ -704,35 +704,43 @@ def get_tickets(day: str):
     if not rows:
         return {"error": "Aucun match pour cette date"}
 
-    # 1. Genere TOUS les picks de TOUS les matchs
+    # 1. Collecte TOUS les picks de TOUS les matchs
     all_picks = []
     for r in rows:
         m = dict(r)
         all_picks.extend(_all_picks_for_match(m))
 
-    if not all_picks:
-        return {"error": "Aucun pick disponible"}
+    # 2. Filtre principal : cotes 1.20-1.80
+    valid = [p for p in all_picks if 1.20 <= p["cote"] <= 1.80]
+    if not valid:
+        return {"error": "Pas de picks dans la plage 1.20-1.80"}
 
-    # 2. Trie global par cote
-    all_picks.sort(key=lambda x: x["cote"])
+    valid.sort(key=lambda x: x["cote"])
 
-    # 3. Safe : 2 picks, cote ~2 (1 pick par match, les plus fiables)
-    safe = _select_ticket(all_picks, 2.0, 2, 3, max_per_match=1)
-    safe_match_ids = set(p["match_id"] for p in safe)
+    # SAFE : 2-3 picks, cible ~2.0, 1 pick par match
+    safe = _build_ticket(valid, 2.0, 2, 3)
+    safe_ids = {p["match_id"] for p in safe}
 
-    # 4. Medium : 12-15 picks, cote ~120 (1 pick par match, en evitant le safe)
-    medium_pool = [p for p in all_picks if p["match_id"] not in safe_match_ids]
-    medium = _select_ticket(medium_pool, 120.0, 12, 15, max_per_match=1)
-    medium_match_ids = set(p["match_id"] for p in medium)
+    # MEDIUM : 10-15 picks, cible ~120, 1 pick par match, exclut les matchs du safe
+    medium_pool = [p for p in valid if p["match_id"] not in safe_ids]
+    medium = _build_ticket(medium_pool, 120.0, 10, 15)
+    medium_ids = {p["match_id"] for p in medium}
 
-    # 5. Risky : 25-35 picks, cote ~1500
-    #    On autorise 2 picks par match (marches differents)
-    used_ids = safe_match_ids | medium_match_ids
-    risky_pool = [p for p in all_picks if p["match_id"] not in used_ids]
-    # Si pas assez de picks, on ajoute les autres matchs (autorises)
-    if len(risky_pool) < 25:
-        risky_pool = all_picks  # fallback : autorise tous les matchs
-    risky = _select_ticket(risky_pool, 1500.0, 25, 35, max_per_match=2)
+    # RISKY : 15-22 picks, cible ~1500
+    # Pool = TOUS les picks disponibles (y compris matchs deja utilises)
+    # avec max 2 picks par match (marches differents) pour eviter les doublons
+    risky_pool = list(valid)  # on prend TOUT valid
+    risky = _build_ticket_2pm(risky_pool, 1500.0, 15, 22, max_per_match=2)
+
+    # Si encore trop court, elargit la plage de cote pour le risky
+    if len(risky) < 15:
+        wide_pool = [p for p in all_picks if 1.30 <= p["cote"] <= 2.50]
+        wide_pool.sort(key=lambda x: x["cote"])
+        risky = _build_ticket_2pm(wide_pool, 1500.0, 15, 22, max_per_match=2)
+
+    # Dernier fallback : prend tous les picks sans contrainte de plage
+    if len(risky) < 10:
+        risky = _build_ticket_2pm(all_picks, 1500.0, 10, 22, max_per_match=2)
 
     return {
         "date": day,
@@ -755,7 +763,6 @@ def get_tickets(day: str):
             "picks": risky,
         },
     }
-
 @app.get("/live-scores/{day}")
 async def get_live_scores(day: str, refresh: bool = False):
     all_results = []
