@@ -211,34 +211,30 @@ def calc_expected_goals(league_code: str):
 
 def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
     """
-    Calcule les xG en tenant compte des stats reelles des equipes.
-    Fallback sur l'ancienne methode si stats indisponibles.
+    Calcule les xG en tenant compte du classement (points/match) et de la forme.
+    Plus robuste que la version basee uniquement sur les buts.
     """
     base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
 
-    # Recupere les stats des 2 equipes
-        # Recupere les stats des 2 equipes (avec matching souple)
+    # Recupere les stats des 2 equipes (avec matching souple)
     conn = db()
     league_name = COMPETITIONS.get(league_code, "")
 
     def _find_team_stats(team_name, lg_name):
-        """Trouve les stats avec matching souple (ignore prefixes)."""
-        # 1. Exact match
         row = conn.execute(
             "SELECT * FROM team_stats WHERE team=? AND league=?",
             (team_name, lg_name),
         ).fetchone()
         if row:
             return row
-        # 2. Match souple : ignore prefixes/suffixes courants
         prefixes = ["FC ", "AC ", "SC ", "AS ", "SS ", "SSC ", "CF ", "RC ",
                     "1. ", "SV ", "TSG ", "VfB ", "VfL ", "FK ", "SK ",
-                    "CD ", "GD ", "CA ", "Real ", "Sporting "]
+                    "CD ", "GD ", "CA ", "Real ", "Sporting ", "Club ",
+                    "Atletico ", "Atlético ", "Olympique ", "Stade "]
         cleaned = team_name
         for p in prefixes:
             cleaned = cleaned.replace(p, "")
         cleaned = cleaned.strip().lower()
-
         all_teams = conn.execute(
             "SELECT * FROM team_stats WHERE league=?", (lg_name,)
         ).fetchall()
@@ -262,54 +258,72 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
         away_xg = base / 2.0
         return max(0.3, round(home_xg, 2)), max(0.3, round(away_xg, 2))
 
-    # Moyenne de buts par match de chaque equipe
     home_mp = max(home_stats["matches_played"], 1)
     away_mp = max(away_stats["matches_played"], 1)
 
-    # Force offensive (buts marques / match)
+    # === FORMULE PRINCIPALE : POINTS PAR MATCH ===
+    home_ppm = home_stats["points"] / home_mp
+    away_ppm = away_stats["points"] / away_mp
+
+    # Si les 2 equipes ont tres peu de points (debut de saison), fallback
+    if home_ppm + away_ppm < 0.1:
+        home_xg = (base / 2.0) * HOME_ADVANTAGE
+        away_xg = base / 2.0
+        return max(0.3, round(home_xg, 2)), max(0.3, round(away_xg, 2))
+
+    # Ratio de force base sur les points
+    total_ppm = home_ppm + away_ppm
+    home_ratio = home_ppm / total_ppm
+    away_ratio = 1.0 - home_ratio
+
+    # xG de base
+    home_xg = base * home_ratio * HOME_ADVANTAGE
+    away_xg = base * away_ratio / HOME_ADVANTAGE
+
+    # Ajustement fin par attaque/defense (poids 25%)
     home_attack = home_stats["goals_for"] / home_mp
-    away_attack = away_stats["goals_for"] / away_mp
-
-    # Force defensive (buts encaisses / match)
     home_defense = home_stats["goals_against"] / home_mp
+    away_attack = away_stats["goals_for"] / away_mp
     away_defense = away_stats["goals_against"] / away_mp
-
-    # Moyenne de la ligue
     league_avg = base / 2.0
 
-    # xG domicile = (attaque dom + defense ext) / 2 * avantage domicile
-    home_xg_raw = ((home_attack + away_defense) / 2.0) * HOME_ADVANTAGE
+    # Ratio attaque/defense (0.5 a 2.0, 1.0 = moyenne)
+    home_attack_ratio = home_attack / league_avg if league_avg > 0 else 1.0
+    away_attack_ratio = away_attack / league_avg if league_avg > 0 else 1.0
+    home_defense_ratio = home_defense / league_avg if league_avg > 0 else 1.0
+    away_defense_ratio = away_defense / league_avg if league_avg > 0 else 1.0
 
-    # xG exterieur = (attaque ext + defense dom) / 2
-    away_xg_raw = (away_attack + home_defense) / 2.0
+    # Ajustement : home_xg *= (attaque_dom / defense_ext)
+    # Si Liverpool attaque bien (1.5) et Brighton defend mal (1.3), boost xG
+    home_attack_factor = (home_attack_ratio + 0.5) / (away_defense_ratio + 0.5)
+    away_attack_factor = (away_attack_ratio + 0.5) / (home_defense_ratio + 0.5)
 
-    # Ajustement par la forme (5 derniers matchs : W=3, D=1, L=0)
-    def form_factor(form_str: str) -> float:
+    # Applique un ajustement pondere (25%)
+    home_xg *= (0.75 + 0.25 * home_attack_factor)
+    away_xg *= (0.75 + 0.25 * away_attack_factor)
+
+    # Ajustement par la forme (5 derniers matchs)
+    def form_factor(form_str):
         if not form_str:
             return 1.0
         wins = form_str.upper().count("W")
         draws = form_str.upper().count("D")
-        losses = form_str.upper().count("L")
-        total = wins + draws + losses
+        total = len(form_str)
         if total == 0:
             return 1.0
         points = wins * 3 + draws
         max_points = total * 3
         ratio = points / max_points if max_points > 0 else 0.5
-        # Convertit en facteur 0.85 a 1.15
-        return 0.85 + (ratio * 0.30)
+        return 0.90 + (ratio * 0.20)  # 0.90 a 1.10 (moins agressif)
 
-    home_form = form_factor(home_stats["form"] or "")
-    away_form = form_factor(away_stats["form"] or "")
+    home_xg *= form_factor(home_stats["form"] or "")
+    away_xg *= form_factor(away_stats["form"] or "")
 
-    home_xg = home_xg_raw * home_form
-    away_xg = away_xg_raw * away_form
-
-    # Plafonnement strict pour eviter les xG aberrants
+    # Plafonnement
     home_xg = max(0.3, min(3.0, round(home_xg, 2)))
     away_xg = max(0.3, min(3.0, round(away_xg, 2)))
 
-    # Plafonne aussi le total
+    # Plafonne le total
     total = home_xg + away_xg
     if total > 4.5:
         ratio = 4.5 / total
