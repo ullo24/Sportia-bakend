@@ -1464,7 +1464,7 @@ async def get_live_scores(day: str, refresh: bool = False):
 
 @app.get("/tickets-week")
 async def get_tickets_week():
-    """Ticket semaine : meme logique que risky mais sur les top equipes."""
+    """Ticket semaine : 1 pick par match eligible (top equipes)."""
     today = date.today()
     week_later = (today + timedelta(days=7)).isoformat()
 
@@ -1488,7 +1488,7 @@ async def get_tickets_week():
     if not rows:
         return {"error": "Aucun match cette semaine"}
 
-    # 3. Filtre : au moins une equipe top + match a venir (pas termine, pas en cours)
+    # 3. Filtre : au moins une equipe top + match a venir
     eligible = []
     for r in rows:
         m = dict(r)
@@ -1516,43 +1516,35 @@ async def get_tickets_week():
     if not eligible:
         return {"error": "Aucun match avec equipe top cette semaine"}
 
-    # 4. MEME LOGIQUE QUE RISKY : diversification + fallback
+    # 4. UN PICK PAR MATCH ELIGIBLE (minimum garanti)
     week_picks = []
     used_ids = set()
     market_count = {}
-    MAX_PER_MARKET = 3
+    MAX_PER_MARKET = 5  # plus permissif pour couvrir plus de matchs
 
-    # === Etape 1 : _calc_risky_pick sur les matchs eligibles ===
     for m in eligible:
-        try:
-            pick = _calc_risky_pick(m)
-        except Exception:
-            pick = None
-        if not pick:
-            continue
-        # Restriction safe : cote <= 1.70
-        if pick["cote"] > 1.70:
-            continue
-        mk = pick["market"]
-        if market_count.get(mk, 0) >= MAX_PER_MARKET:
-            continue
-        week_picks.append(pick)
-        used_ids.add(m["id"])
-        market_count[mk] = market_count.get(mk, 0) + 1
+        pick = None
 
-    # === Etape 2 : fallback marches varies si < 8 ===
-    if len(week_picks) < 8:
-        for m in eligible:
-            if m["id"] in used_ids:
-                continue
+        # === Tentative 1 : _calc_risky_pick (logique risky) ===
+        try:
+            risky_pick = _calc_risky_pick(m)
+            if risky_pick and risky_pick["cote"] <= 1.85:
+                pick = risky_pick
+        except Exception:
+            pass
+
+        # === Tentative 2 : fallback marches varies (cote 1.30-1.75) ===
+        if not pick:
             best_pick = None
             best_dist = 999
             for label, prob, desc in [
+                ("+1.5", m.get("over_15"), "+1.5 buts"),
                 ("+2.5", m.get("over_25"), "+2.5 buts"),
                 ("+3.5", m.get("over_35"), "+3.5 buts"),
+                ("-2.5", m.get("under_25"), "-2.5 buts"),
+                ("-3.5", m.get("under_35"), "-3.5 buts"),
                 ("BTTS", m.get("btts_yes"), "Les 2 equipes marquent"),
                 ("1MT", m.get("first_half_goal"), "But en 1ere MT"),
-                ("-2.5", m.get("under_25"), "-2.5 buts"),
                 ("+1.5 1MT", m.get("first_half_over_15"), "+1.5 1ere MT"),
                 ("1X", m.get("dc_1x"), "Double Chance 1X"),
                 ("12", m.get("dc_12"), "Double Chance 12"),
@@ -1563,7 +1555,6 @@ async def get_tickets_week():
                 ("H+1 E", m.get("handicap_away_plus1"), "Handicap +1 Exterieur"),
                 ("Dom. marque", m.get("home_scores"), "Domicile marque"),
                 ("Ext. marque", m.get("away_scores"), "Exterieur marque"),
-                ("+1.5", m.get("over_15"), "+1.5 buts"),
             ]:
                 if not prob:
                     continue
@@ -1571,12 +1562,14 @@ async def get_tickets_week():
                     cote = 1.0 / prob
                 except Exception:
                     continue
-                # Restriction safe : cote entre 1.25 et 1.75
-                if cote < 1.25 or cote > 1.75:
+                if cote < 1.20 or cote > 1.80:
                     continue
-                if market_count.get(label, 0) >= MAX_PER_MARKET:
+                # Bonus pour les marches pas encore satures
+                saturation = market_count.get(label, 0)
+                if saturation >= MAX_PER_MARKET:
                     continue
-                dist = abs(cote - 1.50)  # cible safe ~1.50
+                # Cible ~1.50 avec penalite si marche sature
+                dist = abs(cote - 1.50) + (saturation * 0.1)
                 if dist < best_dist:
                     best_dist = dist
                     best_pick = {
@@ -1586,39 +1579,45 @@ async def get_tickets_week():
                         "market": label, "description": desc,
                         "proba": round(prob, 3), "cote": round(cote, 2),
                     }
-            if best_pick:
-                week_picks.append(best_pick)
-                used_ids.add(m["id"])
-                mk = best_pick["market"]
-                market_count[mk] = market_count.get(mk, 0) + 1
+            pick = best_pick
 
-    # === Etape 3 : fallback ultime si < 5 ===
-    if len(week_picks) < 5:
-        for m in eligible:
-            if m["id"] in used_ids:
-                continue
-            prob = m.get("over_15")
-            if prob and prob >= 0.75:
-                week_picks.append({
+        # === Tentative 3 : dernier recours, n'importe quel marche safe ===
+        if not pick:
+            for label, prob, desc in [
+                ("+1.5", m.get("over_15"), "+1.5 buts"),
+                ("1X", m.get("dc_1x"), "Double Chance 1X"),
+                ("Dom. marque", m.get("home_scores"), "Domicile marque"),
+                ("Ext. marque", m.get("away_scores"), "Exterieur marque"),
+            ]:
+                if not prob:
+                    continue
+                try:
+                    cote = 1.0 / prob
+                except Exception:
+                    continue
+                if cote < 1.10 or cote > 2.10:
+                    continue
+                pick = {
                     "match_id": m["id"], "home": m["home"], "away": m["away"],
                     "league": m["league"], "kickoff": m["kickoff"],
                     "home_logo": m["home_logo"], "away_logo": m["away_logo"],
-                    "market": "+1.5", "description": "+1.5 buts",
-                    "proba": round(prob, 3), "cote": round(1.0 / prob, 2),
-                })
-                used_ids.add(m["id"])
+                    "market": label, "description": desc,
+                    "proba": round(prob, 3), "cote": round(cote, 2),
+                }
+                break
+
+        if pick:
+            week_picks.append(pick)
+            used_ids.add(m["id"])
+            mk = pick["market"]
+            market_count[mk] = market_count.get(mk, 0) + 1
 
     if not week_picks:
-        return {"error": "Aucun pick safe trouve"}
+        return {"error": "Aucun pick trouve"}
 
-    # 5. Construit le ticket (cible 1500, comme risky)
-    week_ticket = _build_ticket(week_picks, 1500.0, 3, 25)
-    if week_ticket is None or not isinstance(week_ticket, list):
-        week_ticket = week_picks[:15]
-
-    # 6. Enrichit avec evaluation
+    # 5. Enrichit avec evaluation
     match_map = {dict(r)["id"]: dict(r) for r in rows}
-    for p in week_ticket:
+    for p in week_picks:
         match = match_map.get(p["match_id"])
         if match:
             try:
@@ -1640,9 +1639,9 @@ async def get_tickets_week():
         "week_start": today.isoformat(),
         "week_end": week_later,
         "total_eligible_matches": len(eligible),
-        "total_picks": len(week_ticket),
-        "total_cote": _calc_total_cote(week_ticket) if week_ticket else 1.0,
-        "picks": week_ticket,
+        "total_picks": len(week_picks),
+        "total_cote": _calc_total_cote(week_picks) if week_picks else 1.0,
+        "picks": week_picks,
         "markets_used": dict(market_count),
         "top_teams": {code: list(teams) for code, teams in top_teams_by_league.items()},
     }
