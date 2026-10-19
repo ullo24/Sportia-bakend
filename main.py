@@ -17,6 +17,16 @@ API_KEY = os.getenv("FOOTBALL_DATA_KEY")
 if not API_KEY:
     print("ATTENTION : FOOTBALL_DATA_KEY n'est pas definie !")
 
+APISPORTS_KEY = os.getenv("APISPORTS_KEY")
+APISPORTS_HOST = "v3.football.api-sports.io"
+
+# IDs des compétitions européennes sur API-Football
+API_FOOTBALL_LEAGUES = {
+    "CL": 2,   # Champions League
+    "EL": 3,   # Europa League
+    "UECL": 848, # Conference League (ID à vérifier sur le dashboard)
+}
+
 
 BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": API_KEY or ""}
@@ -461,6 +471,21 @@ async def fetch_competition_matches(code: str, date_from: str, date_to: str):
             print("Exception " + code + " : " + str(e))
             return []
 
+async def fetch_apisports_matches(league_id: int, season: int, date_from: str, date_to: str):
+    """Récupère les matchs d'une compétition via API-Sports."""
+    url = f"https://{APISPORTS_HOST}/fixtures"
+    headers = {"x-apisports-key": APISPORTS_KEY}
+    params = {"league": league_id, "season": season, "from": date_from, "to": date_to}
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url, headers=headers, params=params)
+            if r.status_code != 200:
+                print(f"Erreur API-Sports {league_id}: {r.status_code}")
+                return []
+            return r.json().get("response", [])
+    except Exception as e:
+        print(f"Exception API-Sports {league_id}: {e}")
+        return []
 
 async def daily_pipeline():
     print("=== Pipeline " + datetime.now().isoformat() + " ===")
@@ -475,7 +500,17 @@ async def daily_pipeline():
             m["_code"] = code
         all_matches.extend(matches)
         await asyncio.sleep(6)
-
+    # --- AJOUT : Récupération des compétitions européennes via API-Sports ---
+    season = today.year  # La saison de la CL commence l'année civile précédente
+    if today.month < 7:  # Si on est avant juillet, on est sur la saison précédente
+        season -= 1
+    for code, league_id in API_FOOTBALL_LEAGUES.items():
+        league_name = COMPETITIONS.get(code, code)
+        api_matches = await fetch_apisports_matches(league_id, season, date_from, date_to)
+        converted = convert_apisports_to_internal(api_matches, code, league_name)
+        all_matches.extend(converted)
+        await asyncio.sleep(2)  # Petite pause pour respecter le rate limit
+    # ----------------------------------------------------------------------
     print(str(len(all_matches)) + " matchs recuperes")
     if not all_matches:
         return
@@ -681,6 +716,38 @@ def _build_ticket(pool, target_cote, min_n, max_n):
             best_diff = diff
             best = combo
     return best
+
+def convert_apisports_to_internal(api_matches: list, league_code: str, league_name: str) -> list:
+    """Convertit le format API-Sports vers le format interne (football-data.org)."""
+    converted = []
+    for match in api_matches:
+        try:
+            fixture = match.get("fixture", {})
+            teams = match.get("teams", {})
+            status_short = fixture.get("status", {}).get("short", "NS")
+            # On ne garde que les matchs à venir ou en cours
+            if status_short not in ["NS", "TBD", "1H", "HT", "2H", "ET", "BT", "P"]:
+                continue
+            internal_match = {
+                "id": fixture.get("id"),
+                "homeTeam": {
+                    "name": teams.get("home", {}).get("name"),
+                    "crest": teams.get("home", {}).get("logo"),
+                },
+                "awayTeam": {
+                    "name": teams.get("away", {}).get("name"),
+                    "crest": teams.get("away", {}).get("logo"),
+                },
+                "utcDate": fixture.get("date"),
+                "status": "SCHEDULED" if status_short in ["NS", "TBD"] else "IN_PLAY",
+                "score": {"fullTime": {"home": None, "away": None}},
+                "league": {"name": league_name, "country": "Europe"},
+                "_code": league_code,
+            }
+            converted.append(internal_match)
+        except Exception as e:
+            print(f"Erreur conversion match {match.get('fixture', {}).get('id')}: {e}")
+    return converted
 
 async def fetch_top_teams(code: str, top_n: int):
     """Recupere les N premiers noms d'equipes d'un championnat (cache 24h)."""
