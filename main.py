@@ -274,12 +274,19 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
     home_form = form_factor(home_stats["form"] or "")
     away_form = form_factor(away_stats["form"] or "")
 
-    home_xg = home_xg_raw * home_form
+        home_xg = home_xg_raw * home_form
     away_xg = away_xg_raw * away_form
 
-    # Bornes pour eviter les valeurs absurdes
-    home_xg = max(0.3, min(4.5, round(home_xg, 2)))
-    away_xg = max(0.3, min(4.5, round(away_xg, 2)))
+    # Plafonnement strict pour eviter les xG aberrants
+    home_xg = max(0.3, min(3.0, round(home_xg, 2)))
+    away_xg = max(0.3, min(3.0, round(away_xg, 2)))
+
+    # Plafonne aussi le total
+    total = home_xg + away_xg
+    if total > 4.5:
+        ratio = 4.5 / total
+        home_xg = round(home_xg * ratio, 2)
+        away_xg = round(away_xg * ratio, 2)
 
     return home_xg, away_xg
 
