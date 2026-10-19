@@ -217,15 +217,43 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
     base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
 
     # Recupere les stats des 2 equipes
+        # Recupere les stats des 2 equipes (avec matching souple)
     conn = db()
-    home_stats = conn.execute(
-        "SELECT * FROM team_stats WHERE team=? AND league=?",
-        (home_team, COMPETITIONS.get(league_code, "")),
-    ).fetchone()
-    away_stats = conn.execute(
-        "SELECT * FROM team_stats WHERE team=? AND league=?",
-        (away_team, COMPETITIONS.get(league_code, "")),
-    ).fetchone()
+    league_name = COMPETITIONS.get(league_code, "")
+
+    def _find_team_stats(team_name, lg_name):
+        """Trouve les stats avec matching souple (ignore prefixes)."""
+        # 1. Exact match
+        row = conn.execute(
+            "SELECT * FROM team_stats WHERE team=? AND league=?",
+            (team_name, lg_name),
+        ).fetchone()
+        if row:
+            return row
+        # 2. Match souple : ignore prefixes/suffixes courants
+        prefixes = ["FC ", "AC ", "SC ", "AS ", "SS ", "SSC ", "CF ", "RC ",
+                    "1. ", "SV ", "TSG ", "VfB ", "VfL ", "FK ", "SK ",
+                    "CD ", "GD ", "CA ", "Real ", "Sporting "]
+        cleaned = team_name
+        for p in prefixes:
+            cleaned = cleaned.replace(p, "")
+        cleaned = cleaned.strip().lower()
+
+        all_teams = conn.execute(
+            "SELECT * FROM team_stats WHERE league=?", (lg_name,)
+        ).fetchall()
+        for team_row in all_teams:
+            t = team_row["team"]
+            t_clean = t
+            for p in prefixes:
+                t_clean = t_clean.replace(p, "")
+            t_clean = t_clean.strip().lower()
+            if cleaned in t_clean or t_clean in cleaned:
+                return team_row
+        return None
+
+    home_stats = _find_team_stats(home_team, league_name)
+    away_stats = _find_team_stats(away_team, league_name)
     conn.close()
 
     # Fallback si pas de stats
