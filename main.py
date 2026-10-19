@@ -210,13 +210,9 @@ def calc_expected_goals(league_code: str):
     return max(0.3, round(home_xg, 2)), max(0.3, round(away_xg, 2))
 
 def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
-    """
-    Calcule les xG en tenant compte du classement (points/match) et de la forme.
-    Plus robuste que la version basee uniquement sur les buts.
-    """
+    """Calcule les xG avec classement + stats + garde-fous contre valeurs extremes."""
     base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
 
-    # Recupere les stats des 2 equipes (avec matching souple)
     conn = db()
     league_name = COMPETITIONS.get(league_code, "")
 
@@ -252,57 +248,60 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
     away_stats = _find_team_stats(away_team, league_name)
     conn.close()
 
-    # Fallback si pas de stats
-    if not home_stats or not away_stats:
+    # === GARDE-FOU 1 : si UNE des 2 equipes manque de stats, fallback complet ===
+    home_ok = home_stats and home_stats["matches_played"] >= 3
+    away_ok = away_stats and away_stats["matches_played"] >= 3
+
+    if not home_ok or not away_ok:
+        # Fallback : moyenne de ligue + avantage domicile
         home_xg = (base / 2.0) * HOME_ADVANTAGE
         away_xg = base / 2.0
-        return max(0.3, round(home_xg, 2)), max(0.3, round(away_xg, 2))
+        return max(0.5, round(home_xg, 2)), max(0.5, round(away_xg, 2))
 
     home_mp = max(home_stats["matches_played"], 1)
     away_mp = max(away_stats["matches_played"], 1)
 
-    # === FORMULE PRINCIPALE : POINTS PAR MATCH ===
+    # === FORMULE : points par match (classement) ===
     home_ppm = home_stats["points"] / home_mp
     away_ppm = away_stats["points"] / away_mp
 
-    # Si les 2 equipes ont tres peu de points (debut de saison), fallback
-    if home_ppm + away_ppm < 0.1:
+    # === GARDE-FOU 2 : si les 2 equipes ont tres peu de points, fallback ===
+    if home_ppm + away_ppm < 0.5:
         home_xg = (base / 2.0) * HOME_ADVANTAGE
         away_xg = base / 2.0
-        return max(0.3, round(home_xg, 2)), max(0.3, round(away_xg, 2))
+        return max(0.5, round(home_xg, 2)), max(0.5, round(away_xg, 2))
 
-    # Ratio de force base sur les points
+    # === GARDE-FOU 3 : limiter l'ecart max entre les 2 equipes ===
+    # empeche qu'une equipe ait 0.3 et l'autre 2.5 (ratio max 3:1)
+    home_ppm = max(home_ppm, away_ppm * 0.33)
+    away_ppm = max(away_ppm, home_ppm * 0.33)
+
     total_ppm = home_ppm + away_ppm
     home_ratio = home_ppm / total_ppm
     away_ratio = 1.0 - home_ratio
 
-    # xG de base
     home_xg = base * home_ratio * HOME_ADVANTAGE
     away_xg = base * away_ratio / HOME_ADVANTAGE
 
-    # Ajustement fin par attaque/defense (poids 25%)
+    # === AJUSTEMENT attaque/defense (25% poids) ===
     home_attack = home_stats["goals_for"] / home_mp
     home_defense = home_stats["goals_against"] / home_mp
     away_attack = away_stats["goals_for"] / away_mp
     away_defense = away_stats["goals_against"] / away_mp
     league_avg = base / 2.0
 
-    # Ratio attaque/defense (0.5 a 2.0, 1.0 = moyenne)
     home_attack_ratio = home_attack / league_avg if league_avg > 0 else 1.0
     away_attack_ratio = away_attack / league_avg if league_avg > 0 else 1.0
     home_defense_ratio = home_defense / league_avg if league_avg > 0 else 1.0
     away_defense_ratio = away_defense / league_avg if league_avg > 0 else 1.0
 
-    # Ajustement : home_xg *= (attaque_dom / defense_ext)
-    # Si Liverpool attaque bien (1.5) et Brighton defend mal (1.3), boost xG
     home_attack_factor = (home_attack_ratio + 0.5) / (away_defense_ratio + 0.5)
     away_attack_factor = (away_attack_ratio + 0.5) / (home_defense_ratio + 0.5)
 
-    # Applique un ajustement pondere (25%)
     home_xg *= (0.75 + 0.25 * home_attack_factor)
     away_xg *= (0.75 + 0.25 * away_attack_factor)
 
-    # Ajustement par la forme (5 derniers matchs)
+    # === FORME (5 derniers matchs) ===
     def form_factor(form_str):
         if not form_str:
             return 1.0
@@ -314,14 +313,14 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
         points = wins * 3 + draws
         max_points = total * 3
         ratio = points / max_points if max_points > 0 else 0.5
-        return 0.90 + (ratio * 0.20)  # 0.90 a 1.10 (moins agressif)
+        return 0.90 + (ratio * 0.20)
 
     home_xg *= form_factor(home_stats["form"] or "")
     away_xg *= form_factor(away_stats["form"] or "")
 
-    # Plafonnement
-    home_xg = max(0.3, min(3.0, round(home_xg, 2)))
-    away_xg = max(0.3, min(3.0, round(away_xg, 2)))
+    # === GARDE-FOU FINAL : plancher 0.6 (pas 0.3) ===
+    home_xg = max(0.6, min(3.0, round(home_xg, 2)))
+    away_xg = max(0.6, min(3.0, round(away_xg, 2)))
 
     # Plafonne le total
     total = home_xg + away_xg
@@ -331,7 +330,6 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
         away_xg = round(away_xg * ratio, 2)
 
     return home_xg, away_xg
-
 def predict_all_markets(home_xg: float, away_xg: float) -> dict:
     MAX_GOALS = 10
     score_probs = {}
