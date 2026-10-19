@@ -91,9 +91,30 @@ def init_db():
             free_access INTEGER DEFAULT 0,
             updated_at TEXT
         )
+        
     """)
     c.execute("CREATE TABLE IF NOT EXISTS api_log (day TEXT PRIMARY KEY, count INTEGER)")
     c.execute("CREATE TABLE IF NOT EXISTS team_logos (team TEXT PRIMARY KEY, logo TEXT)")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS team_stats (
+            team TEXT,
+            league TEXT,
+            matches_played INTEGER,
+            wins INTEGER,
+            draws INTEGER,
+            losses INTEGER,
+            goals_for INTEGER,
+            goals_against INTEGER,
+            goals_for_home INTEGER,
+            goals_against_home INTEGER,
+            goals_for_away INTEGER,
+            goals_against_away INTEGER,
+            points INTEGER,
+            form TEXT,
+            cached_at TEXT,
+            PRIMARY KEY (team, league)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -178,6 +199,79 @@ def calc_expected_goals(league_code: str):
     away_xg = base / 2.0
     return max(0.3, round(home_xg, 2)), max(0.3, round(away_xg, 2))
 
+def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
+    """
+    Calcule les xG en tenant compte des stats reelles des equipes.
+    Fallback sur l'ancienne methode si stats indisponibles.
+    """
+    base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
+
+    # Recupere les stats des 2 equipes
+    conn = db()
+    home_stats = conn.execute(
+        "SELECT * FROM team_stats WHERE team=? AND league=?",
+        (home_team, COMPETITIONS.get(league_code, "")),
+    ).fetchone()
+    away_stats = conn.execute(
+        "SELECT * FROM team_stats WHERE team=? AND league=?",
+        (away_team, COMPETITIONS.get(league_code, "")),
+    ).fetchone()
+    conn.close()
+
+    # Fallback si pas de stats
+    if not home_stats or not away_stats:
+        home_xg = (base / 2.0) * HOME_ADVANTAGE
+        away_xg = base / 2.0
+        return max(0.3, round(home_xg, 2)), max(0.3, round(away_xg, 2))
+
+    # Moyenne de buts par match de chaque equipe
+    home_mp = max(home_stats["matches_played"], 1)
+    away_mp = max(away_stats["matches_played"], 1)
+
+    # Force offensive (buts marques / match)
+    home_attack = home_stats["goals_for"] / home_mp
+    away_attack = away_stats["goals_for"] / away_mp
+
+    # Force defensive (buts encaisses / match)
+    home_defense = home_stats["goals_against"] / home_mp
+    away_defense = away_stats["goals_against"] / away_mp
+
+    # Moyenne de la ligue
+    league_avg = base / 2.0
+
+    # xG domicile = (attaque dom + defense ext) / 2 * avantage domicile
+    home_xg_raw = ((home_attack + away_defense) / 2.0) * HOME_ADVANTAGE
+
+    # xG exterieur = (attaque ext + defense dom) / 2
+    away_xg_raw = (away_attack + home_defense) / 2.0
+
+    # Ajustement par la forme (5 derniers matchs : W=3, D=1, L=0)
+    def form_factor(form_str: str) -> float:
+        if not form_str:
+            return 1.0
+        wins = form_str.upper().count("W")
+        draws = form_str.upper().count("D")
+        losses = form_str.upper().count("L")
+        total = wins + draws + losses
+        if total == 0:
+            return 1.0
+        points = wins * 3 + draws
+        max_points = total * 3
+        ratio = points / max_points if max_points > 0 else 0.5
+        # Convertit en facteur 0.85 a 1.15
+        return 0.85 + (ratio * 0.30)
+
+    home_form = form_factor(home_stats["form"] or "")
+    away_form = form_factor(away_stats["form"] or "")
+
+    home_xg = home_xg_raw * home_form
+    away_xg = away_xg_raw * away_form
+
+    # Bornes pour eviter les valeurs absurdes
+    home_xg = max(0.3, min(4.5, round(home_xg, 2)))
+    away_xg = max(0.3, min(4.5, round(away_xg, 2)))
+
+    return home_xg, away_xg
 
 def predict_all_markets(home_xg: float, away_xg: float) -> dict:
     MAX_GOALS = 10
@@ -385,7 +479,14 @@ async def daily_pipeline():
     print(str(len(all_matches)) + " matchs recuperes")
     if not all_matches:
         return
-
+    # Charge les stats des equipes (cache 24h)
+    print("Recuperation des stats d'equipes...")
+    for code, league_name in COMPETITIONS.items():
+        try:
+            await fetch_team_stats(code, league_name)
+            await asyncio.sleep(6)  # respecte la limite API
+        except Exception as e:
+            print(f"Erreur stats {code}: {e}")
     print("Recuperation des logos...")
     logos = {}
     for m in all_matches:
@@ -420,7 +521,7 @@ async def daily_pipeline():
             ht_home = m.get("score", {}).get("halfTime", {}).get("home")
             ht_away = m.get("score", {}).get("halfTime", {}).get("away")
 
-            home_xg, away_xg = calc_expected_goals(code)
+            home_xg, away_xg = calc_expected_goals_v2(code, home, away)
             pred = predict_all_markets(home_xg, away_xg)
             ext = predict_extended_markets(
                 home_xg, away_xg,
@@ -617,6 +718,75 @@ async def fetch_top_teams(code: str, top_n: int):
         print("Exception standings " + code + " : " + str(e))
     return []
 
+async def fetch_team_stats(code: str, league_name: str):
+    """Recupere les stats de toutes les equipes d'un championnat (cache 24h)."""
+    # Cache check
+    conn = db()
+    row = conn.execute(
+        "SELECT COUNT(*) as c, MAX(cached_at) as last FROM team_stats WHERE league=?",
+        (league_name,),
+    ).fetchone()
+    conn.close()
+
+    if row and row["c"] > 0 and row["last"]:
+        try:
+            age = (datetime.now() - datetime.fromisoformat(row["last"])).total_seconds()
+            if age < 86400:
+                print(f"Stats {league_name} en cache ({row['c']} equipes)")
+                return
+        except Exception:
+            pass
+
+    # Fetch API
+    url = BASE_URL + "/competitions/" + code + "/standings"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url, headers=HEADERS)
+            increment_count()
+            if r.status_code != 200:
+                print(f"Erreur standings {code} : {r.status_code}")
+                return
+            data = r.json()
+            standings = data.get("standings", [])
+            for s in standings:
+                if s.get("type") != "TOTAL":
+                    continue
+                table = s.get("table", [])
+                conn = db()
+                now = datetime.now().isoformat()
+                for row_team in table:
+                    team_name = row_team.get("team", {}).get("name", "")
+                    if not team_name:
+                        continue
+                    conn.execute("""
+                        INSERT OR REPLACE INTO team_stats
+                        (team, league, matches_played, wins, draws, losses,
+                         goals_for, goals_against, goals_for_home, goals_against_home,
+                         goals_for_away, goals_against_away, points, form, cached_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        team_name, league_name,
+                        row_team.get("playedGames", 0),
+                        row_team.get("won", 0),
+                        row_team.get("draw", 0),
+                        row_team.get("lost", 0),
+                        row_team.get("goalsFor", 0),
+                        row_team.get("goalsAgainst", 0),
+                        row_team.get("goalsFor", 0) // 2,   # estimation domicile
+                        row_team.get("goalsAgainst", 0) // 2,
+                        row_team.get("goalsFor", 0) - row_team.get("goalsFor", 0) // 2,
+                        row_team.get("goalsAgainst", 0) - row_team.get("goalsAgainst", 0) // 2,
+                        row_team.get("points", 0),
+                        row_team.get("form", "") or "",
+                        now,
+                    ))
+                conn.commit()
+                conn.close()
+                print(f"Stats {league_name} : {len(table)} equipes mises a jour")
+                return
+    except Exception as e:
+        print(f"Exception standings {code} : {e}")
+    
 def _evaluate_pick(pick, match):
     """Evalue un pick selon l'etat actuel du match."""
     market = pick.get("market", "")
