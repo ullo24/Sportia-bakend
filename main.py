@@ -274,7 +274,7 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
     home_form = form_factor(home_stats["form"] or "")
     away_form = form_factor(away_stats["form"] or "")
 
-        home_xg = home_xg_raw * home_form
+    home_xg = home_xg_raw * home_form
     away_xg = away_xg_raw * away_form
 
     # Plafonnement strict pour eviter les xG aberrants
