@@ -210,50 +210,73 @@ def calc_expected_goals(league_code: str):
     return max(0.3, round(home_xg, 2)), max(0.3, round(away_xg, 2))
 
 def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
-    """Calcule les xG avec classement + stats + garde-fous contre valeurs extremes."""
+    """Calcule les xG avec classement + stats + garde-fous."""
     base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
 
     conn = db()
     league_name = COMPETITIONS.get(league_code, "")
 
-    def _find_team_stats(team_name, lg_name):
+    # Les competitions europeennes ont des equipes de plusieurs ligues
+    # -> on autorise la recherche dans n'importe quelle ligue
+    allow_any_league = league_code in ["CL", "EL", "UECL", "EC", "WC"]
+
+    prefixes = ["FC ", "AC ", "SC ", "AS ", "SS ", "SSC ", "CF ", "RC ",
+                "1. ", "SV ", "TSG ", "VfB ", "VfL ", "FK ", "SK ",
+                "CD ", "GD ", "CA ", "Real ", "Sporting ", "Club ",
+                "Atletico ", "Atlético ", "Olympique ", "Stade "]
+
+    def _clean_name(n):
+        cleaned = n
+        for p in prefixes:
+            cleaned = cleaned.replace(p, "")
+        return cleaned.strip().lower()
+
+    def _find_team_stats(team_name):
+        # 1. Exact match dans la ligue specifique
         row = conn.execute(
             "SELECT * FROM team_stats WHERE team=? AND league=?",
-            (team_name, lg_name),
+            (team_name, league_name),
         ).fetchone()
         if row:
             return row
-        prefixes = ["FC ", "AC ", "SC ", "AS ", "SS ", "SSC ", "CF ", "RC ",
-                    "1. ", "SV ", "TSG ", "VfB ", "VfL ", "FK ", "SK ",
-                    "CD ", "GD ", "CA ", "Real ", "Sporting ", "Club ",
-                    "Atletico ", "Atlético ", "Olympique ", "Stade "]
-        cleaned = team_name
-        for p in prefixes:
-            cleaned = cleaned.replace(p, "")
-        cleaned = cleaned.strip().lower()
+
+        # 2. Si competition europeenne : exact match dans n'importe quelle ligue
+        if allow_any_league:
+            row = conn.execute(
+                "SELECT * FROM team_stats WHERE team=? LIMIT 1",
+                (team_name,),
+            ).fetchone()
+            if row:
+                return row
+
+        cleaned = _clean_name(team_name)
+
+        # 3. Prefix match dans la ligue specifique
         all_teams = conn.execute(
-            "SELECT * FROM team_stats WHERE league=?", (lg_name,)
+            "SELECT * FROM team_stats WHERE league=?", (league_name,)
         ).fetchall()
         for team_row in all_teams:
-            t = team_row["team"]
-            t_clean = t
-            for p in prefixes:
-                t_clean = t_clean.replace(p, "")
-            t_clean = t_clean.strip().lower()
-            if cleaned in t_clean or t_clean in cleaned:
+            if cleaned in _clean_name(team_row["team"]) or _clean_name(team_row["team"]) in cleaned:
                 return team_row
+
+        # 4. Prefix match dans n'importe quelle ligue (CL/EL)
+        if allow_any_league:
+            all_teams = conn.execute("SELECT * FROM team_stats").fetchall()
+            for team_row in all_teams:
+                if cleaned in _clean_name(team_row["team"]) or _clean_name(team_row["team"]) in cleaned:
+                    return team_row
+
         return None
 
-    home_stats = _find_team_stats(home_team, league_name)
-    away_stats = _find_team_stats(away_team, league_name)
+    home_stats = _find_team_stats(home_team)
+    away_stats = _find_team_stats(away_team)
     conn.close()
 
-    # === GARDE-FOU 1 : si UNE des 2 equipes manque de stats, fallback complet ===
+    # === GARDE-FOU 1 : fallback si une equipe manque de stats ===
     home_ok = home_stats and home_stats["matches_played"] >= 3
     away_ok = away_stats and away_stats["matches_played"] >= 3
 
     if not home_ok or not away_ok:
-        # Fallback : moyenne de ligue + avantage domicile
         home_xg = (base / 2.0) * HOME_ADVANTAGE
         away_xg = base / 2.0
         return max(0.5, round(home_xg, 2)), max(0.5, round(away_xg, 2))
@@ -261,18 +284,17 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
     home_mp = max(home_stats["matches_played"], 1)
     away_mp = max(away_stats["matches_played"], 1)
 
-    # === FORMULE : points par match (classement) ===
+    # === FORMULE : points par match ===
     home_ppm = home_stats["points"] / home_mp
     away_ppm = away_stats["points"] / away_mp
 
-    # === GARDE-FOU 2 : si les 2 equipes ont tres peu de points, fallback ===
+    # === GARDE-FOU 2 : si peu de points, fallback ===
     if home_ppm + away_ppm < 0.5:
         home_xg = (base / 2.0) * HOME_ADVANTAGE
         away_xg = base / 2.0
         return max(0.5, round(home_xg, 2)), max(0.5, round(away_xg, 2))
 
-    # === GARDE-FOU 3 : limiter l'ecart max entre les 2 equipes ===
-    # empeche qu'une equipe ait 0.3 et l'autre 2.5 (ratio max 3:1)
+    # === GARDE-FOU 3 : ratio max 3:1 entre les 2 equipes ===
     home_ppm = max(home_ppm, away_ppm * 0.33)
     away_ppm = max(away_ppm, home_ppm * 0.33)
 
@@ -283,7 +305,7 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
     home_xg = base * home_ratio * HOME_ADVANTAGE
     away_xg = base * away_ratio / HOME_ADVANTAGE
 
-    # === AJUSTEMENT attaque/defense (25% poids) ===
+    # === Ajustement attaque/defense (25%) ===
     home_attack = home_stats["goals_for"] / home_mp
     home_defense = home_stats["goals_against"] / home_mp
     away_attack = away_stats["goals_for"] / away_mp
@@ -301,7 +323,7 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
     home_xg *= (0.75 + 0.25 * home_attack_factor)
     away_xg *= (0.75 + 0.25 * away_attack_factor)
 
-    # === FORME (5 derniers matchs) ===
+    # === FORME ===
     def form_factor(form_str):
         if not form_str:
             return 1.0
@@ -318,11 +340,10 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
     home_xg *= form_factor(home_stats["form"] or "")
     away_xg *= form_factor(away_stats["form"] or "")
 
-    # === GARDE-FOU FINAL : plancher 0.6 (pas 0.3) ===
+    # === Plancher 0.6 ===
     home_xg = max(0.6, min(3.0, round(home_xg, 2)))
     away_xg = max(0.6, min(3.0, round(away_xg, 2)))
 
-    # Plafonne le total
     total = home_xg + away_xg
     if total > 4.5:
         ratio = 4.5 / total
@@ -330,6 +351,7 @@ def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
         away_xg = round(away_xg * ratio, 2)
 
     return home_xg, away_xg
+    
 def predict_all_markets(home_xg: float, away_xg: float) -> dict:
     MAX_GOALS = 10
     score_probs = {}
