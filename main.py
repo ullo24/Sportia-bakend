@@ -584,14 +584,14 @@ async def daily_pipeline():
     if not all_matches:
         return
     # Charge les stats des equipes (cache 24h)
-    print("Recuperation des stats d'equipes...")
+       print("Recuperation des stats d'equipes...")
+    await asyncio.sleep(10)  # pause avant les standings (laisse l'API respirer)
     for code, league_name in COMPETITIONS.items():
         try:
             await fetch_team_stats(code, league_name)
-            await asyncio.sleep(6)  # respecte la limite API
+            await asyncio.sleep(7)  # 7s entre chaque appel (limite 10/min)
         except Exception as e:
-            print(f"Erreur stats {code}: {e}")
-    print("Recuperation des logos...")
+            print(f"Erreur stats {code}: {e}")    print("Recuperation des logos...")
     logos = {}
     for m in all_matches:
         try:
