@@ -584,7 +584,7 @@ async def daily_pipeline():
     if not all_matches:
         return
     # Charge les stats des equipes (cache 24h)
-       print("Recuperation des stats d'equipes...")
+    print("Recuperation des stats d'equipes...")
     await asyncio.sleep(10)  # pause avant les standings (laisse l'API respirer)
     for code, league_name in COMPETITIONS.items():
         try:
