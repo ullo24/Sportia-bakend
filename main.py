@@ -565,140 +565,150 @@ async def daily_pipeline():
     _PIPELINE_RUNNING = True
     try:
         print(f"=== Pipeline {datetime.now().isoformat()} ===")
-        # ... tout le code existant ici, indenté de 4 espaces ...    today = date.today()
-    date_from = today.isoformat()
-    date_to = (today + timedelta(days=DAYS_AHEAD)).isoformat()
+        today = date.today()
+        date_from = today.isoformat()
+        date_to = (today + timedelta(days=DAYS_AHEAD)).isoformat()
 
-    all_matches = []
-    for code in COMPETITIONS:
-        matches = await fetch_competition_matches(code, date_from, date_to)
-        for m in matches:
-            m["_code"] = code
-        all_matches.extend(matches)
-        await asyncio.sleep(6)
-    # --- AJOUT : Récupération des compétitions européennes via API-Sports ---
-    season = today.year  # La saison de la CL commence l'année civile précédente
-    if today.month < 7:  # Si on est avant juillet, on est sur la saison précédente
-        season -= 1
-    for code, league_id in API_FOOTBALL_LEAGUES.items():
-        league_name = COMPETITIONS.get(code, code)
-        api_matches = await fetch_apisports_matches(league_id, season, date_from, date_to)
-        converted = convert_apisports_to_internal(api_matches, code, league_name)
-        all_matches.extend(converted)
-        await asyncio.sleep(2)  # Petite pause pour respecter le rate limit
-    # ----------------------------------------------------------------------
-    print(str(len(all_matches)) + " matchs recuperes")
-    if not all_matches:
-        return
-    # Charge les stats des equipes (cache 24h)
-    print("Recuperation des stats d'equipes...")
-    await asyncio.sleep(10)  # pause avant les standings (laisse l'API respirer)
-    for code, league_name in COMPETITIONS.items():
-        try:
-            await fetch_team_stats(code, league_name)
-            await asyncio.sleep(7)  # 7s entre chaque appel (limite 10/min)
-        except Exception as e:
-            print(f"Erreur stats {code}: {e}")    
-    print("Recuperation des logos...")
-    logos = {}
-    for m in all_matches:
-        try:
-            home_team = m["homeTeam"]
-            away_team = m["awayTeam"]
-            home_name = home_team.get("name") or home_team.get("shortName", "?")
-            away_name = away_team.get("name") or away_team.get("shortName", "?")
-            if home_name not in logos:
-                logos[home_name] = await get_team_logo(home_team)
-            if away_name not in logos:
-                logos[away_name] = await get_team_logo(away_team)
-            await asyncio.sleep(0.5)
-        except (KeyError, TypeError):
-            continue
-    print(str(len(logos)) + " logos recuperes")
+        all_matches = []
+        for code in COMPETITIONS:
+            matches = await fetch_competition_matches(code, date_from, date_to)
+            for m in matches:
+                m["_code"] = code
+            all_matches.extend(matches)
+            await asyncio.sleep(7)
 
-    conn = db()
-    inserted = 0
-    for m in all_matches:
-        try:
-            code = m.get("_code", "")
-            match_id = m["id"]
-            league = COMPETITIONS.get(code, "Unknown")
-            country = m.get("area", {}).get("name", "International")
-            home = m["homeTeam"]["name"] or m["homeTeam"].get("shortName", "?")
-            away = m["awayTeam"]["name"] or m["awayTeam"].get("shortName", "?")
-            kickoff = m.get("utcDate")
-            status = m.get("status", "SCHEDULED")
-            home_goals = m.get("score", {}).get("fullTime", {}).get("home")
-            away_goals = m.get("score", {}).get("fullTime", {}).get("away")
-            ht_home = m.get("score", {}).get("halfTime", {}).get("home")
-            ht_away = m.get("score", {}).get("halfTime", {}).get("away")
+        # API-Sports (Champions League etc.)
+        season = today.year
+        if today.month < 7:
+            season -= 1
+        for code, league_id in API_FOOTBALL_LEAGUES.items():
+            league_name = COMPETITIONS.get(code, code)
+            try:
+                api_matches = await fetch_apisports_matches(league_id, season, date_from, date_to)
+                converted = convert_apisports_to_internal(api_matches, code, league_name)
+                all_matches.extend(converted)
+                await asyncio.sleep(3)
+            except Exception as e:
+                print(f"Erreur API-Sports {code}: {e}")
 
-            home_xg, away_xg = calc_expected_goals_v2(code, home, away)
-            pred = predict_all_markets(home_xg, away_xg)
-            ext = predict_extended_markets(
-                home_xg, away_xg,
-                pred["home_win"], pred["draw"], pred["away_win"]
-            )
+        print(str(len(all_matches)) + " matchs recuperes")
+        if not all_matches:
+            return
 
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO matches
-                (id, league, country, home, away, home_logo, away_logo,
-                 kickoff, status, home_goals, away_goals,ht_home_goals, ht_away_goals,
-                 home_win, draw, away_win, over_15, under_15, over_25, under_25,
-                 over_35, under_35, over_45, under_45, btts_yes, btts_no,
-                 first_half_goal, handicap_home_1, handicap_away_1,
-                 dc_1x, dc_12, dc_x2, dnb_home, dnb_away,
-                 over_05, under_05, btts_over_25, btts_under_35,
-                 handicap_home_minus1, handicap_away_minus1,
-                 handicap_home_plus1, handicap_away_plus1,
-                 handicap_home_minus2, handicap_away_minus2,
-                 first_half_over_15,
-                 exact_scores, home_scores, away_scores,
-                 home_xg, away_xg, total_xg, confidence, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    match_id, league, country, home, away,
-                    logos.get(home, ""), logos.get(away, ""),
-                    kickoff, status, home_goals, away_goals,ht_home, ht_away,
-                    pred["home_win"], pred["draw"], pred["away_win"],
-                    pred["over_15"], pred["under_15"],
-                    pred["over_25"], pred["under_25"],
-                    pred["over_35"], pred["under_35"],
-                    pred["over_45"], pred["under_45"],
-                    pred["btts_yes"], pred["btts_no"],
-                    pred["first_half_goal"],
-                    pred["handicap_home_1"], pred["handicap_away_1"],
-                    ext["dc_1x"], ext["dc_12"], ext["dc_x2"],
-                    ext["dnb_home"], ext["dnb_away"],
-                    ext["over_05"], ext["under_05"],
-                    ext["btts_over_25"], ext["btts_under_35"],
-                    ext["handicap_home_minus1"], ext["handicap_away_minus1"],
-                    ext["handicap_home_plus1"], ext["handicap_away_plus1"],
-                    ext["handicap_home_minus2"], ext["handicap_away_minus2"],
-                    ext["first_half_over_15"],
-                    ext["exact_scores"], ext["home_scores"], ext["away_scores"],
-                    pred["home_xg"], pred["away_xg"], pred["total_xg"],
-                    pred["confidence"],
-                    datetime.now().isoformat(),
-                ),
-            )
-            inserted += 1
-        except Exception as e:
-            print("Erreur match " + str(m.get("id")) + ": " + str(e))
+        # Pause avant les standings (limite 10/min)
+        await asyncio.sleep(10)
 
-    conn.commit()
-    conn.close()
-    print(str(inserted) + " matchs enregistres")
+        print("Recuperation des stats d'equipes...")
+        for code, league_name in COMPETITIONS.items():
+            try:
+                await fetch_team_stats(code, league_name)
+                await asyncio.sleep(7)
+            except Exception as e:
+                print(f"Erreur stats {code}: {e}")
+
+        print("Recuperation des logos...")
+        logos = {}
+        for m in all_matches:
+            try:
+                home_team = m["homeTeam"]
+                away_team = m["awayTeam"]
+                home_name = home_team.get("name") or home_team.get("shortName", "?")
+                away_name = away_team.get("name") or away_team.get("shortName", "?")
+                if home_name not in logos:
+                    logos[home_name] = await get_team_logo(home_team)
+                if away_name not in logos:
+                    logos[away_name] = await get_team_logo(away_team)
+                await asyncio.sleep(0.5)
+            except (KeyError, TypeError):
+                continue
+        print(str(len(logos)) + " logos recuperes")
+
+        conn = db()
+        inserted = 0
+        for m in all_matches:
+            try:
+                code = m.get("_code", "")
+                match_id = m["id"]
+                league = COMPETITIONS.get(code, "Unknown")
+                country = m.get("area", {}).get("name", "International")
+                home = m["homeTeam"]["name"] or m["homeTeam"].get("shortName", "?")
+                away = m["awayTeam"]["name"] or m["awayTeam"].get("shortName", "?")
+                kickoff = m.get("utcDate")
+                status = m.get("status", "SCHEDULED")
+                home_goals = m.get("score", {}).get("fullTime", {}).get("home")
+                away_goals = m.get("score", {}).get("fullTime", {}).get("away")
+                ht_home = m.get("score", {}).get("halfTime", {}).get("home")
+                ht_away = m.get("score", {}).get("halfTime", {}).get("away")
+
+                home_xg, away_xg = calc_expected_goals_v2(code, home, away)
+                pred = predict_all_markets(home_xg, away_xg)
+                ext = predict_extended_markets(
+                    home_xg, away_xg,
+                    pred["home_win"], pred["draw"], pred["away_win"]
+                )
+
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO matches
+                    (id, league, country, home, away, home_logo, away_logo,
+                     kickoff, status, home_goals, away_goals,
+                     ht_home_goals, ht_away_goals,
+                     home_win, draw, away_win, over_15, under_15, over_25, under_25,
+                     over_35, under_35, over_45, under_45, btts_yes, btts_no,
+                     first_half_goal, handicap_home_1, handicap_away_1,
+                     dc_1x, dc_12, dc_x2, dnb_home, dnb_away,
+                     over_05, under_05, btts_over_25, btts_under_35,
+                     handicap_home_minus1, handicap_away_minus1,
+                     handicap_home_plus1, handicap_away_plus1,
+                     handicap_home_minus2, handicap_away_minus2,
+                     first_half_over_15,
+                     exact_scores, home_scores, away_scores,
+                     home_xg, away_xg, total_xg, confidence, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        match_id, league, country, home, away,
+                        logos.get(home, ""), logos.get(away, ""),
+                        kickoff, status, home_goals, away_goals,
+                        ht_home, ht_away,
+                        pred["home_win"], pred["draw"], pred["away_win"],
+                        pred["over_15"], pred["under_15"],
+                        pred["over_25"], pred["under_25"],
+                        pred["over_35"], pred["under_35"],
+                        pred["over_45"], pred["under_45"],
+                        pred["btts_yes"], pred["btts_no"],
+                        pred["first_half_goal"],
+                        pred["handicap_home_1"], pred["handicap_away_1"],
+                        ext["dc_1x"], ext["dc_12"], ext["dc_x2"],
+                        ext["dnb_home"], ext["dnb_away"],
+                        ext["over_05"], ext["under_05"],
+                        ext["btts_over_25"], ext["btts_under_35"],
+                        ext["handicap_home_minus1"], ext["handicap_away_minus1"],
+                        ext["handicap_home_plus1"], ext["handicap_away_plus1"],
+                        ext["handicap_home_minus2"], ext["handicap_away_minus2"],
+                        ext["first_half_over_15"],
+                        ext["exact_scores"], ext["home_scores"], ext["away_scores"],
+                        pred["home_xg"], pred["away_xg"], pred["total_xg"],
+                        pred["confidence"],
+                        datetime.now().isoformat(),
+                    ),
+                )
+                inserted += 1
+            except Exception as e:
+                print("Erreur match " + str(m.get("id")) + ": " + str(e))
+
+        conn.commit()
+        conn.close()
+        print(str(inserted) + " matchs enregistres")
         mark_free_access()
     finally:
         _PIPELINE_RUNNING = False
         print("=== Pipeline termine ===")
-
+    
 def mark_free_access():
     today = date.today().isoformat()
     conn = db()
