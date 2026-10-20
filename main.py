@@ -31,6 +31,7 @@ API_FOOTBALL_LEAGUES = {
 BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": API_KEY or ""}
 DB_PATH = "/tmp/sportia.db"
+_PIPELINE_RUNNING = False
 
 COMPETITIONS = {
     "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
@@ -557,8 +558,14 @@ async def fetch_apisports_matches(league_id: int, season: int, date_from: str, d
         return []
 
 async def daily_pipeline():
-    print("=== Pipeline " + datetime.now().isoformat() + " ===")
-    today = date.today()
+    global _PIPELINE_RUNNING
+    if _PIPELINE_RUNNING:
+        print("=== Pipeline deja en cours, SKIP ===")
+        return
+    _PIPELINE_RUNNING = True
+    try:
+        print(f"=== Pipeline {datetime.now().isoformat()} ===")
+        # ... tout le code existant ici, indenté de 4 espaces ...    today = date.today()
     date_from = today.isoformat()
     date_to = (today + timedelta(days=DAYS_AHEAD)).isoformat()
 
@@ -687,8 +694,10 @@ async def daily_pipeline():
     conn.commit()
     conn.close()
     print(str(inserted) + " matchs enregistres")
-    mark_free_access()
-
+        mark_free_access()
+    finally:
+        _PIPELINE_RUNNING = False
+        print("=== Pipeline termine ===")
 
 def mark_free_access():
     today = date.today().isoformat()
