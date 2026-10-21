@@ -1297,7 +1297,7 @@ def get_tickets(day: str):
         # MEDIUM
         try:
             medium_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
-            medium = _build_ticket(medium_pool, 120.0, 10, 15)
+            medium = _build_ticket(medium_pool, 120.0, 4, 15)
             if medium is None or not isinstance(medium, list):
                 medium = []
         except Exception:
