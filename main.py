@@ -913,6 +913,18 @@ def convert_zafronix_to_internal(events: list, league_code: str, league_name: st
     converted = []
     for ev in events:
         try:
+            # ID : Zafronix renvoie des IDs string type "mls-2026-453"
+            # On extrait la partie numerique et on ajoute un offset pour eviter les collisions
+            raw_id = ev.get("id", 0)
+            if isinstance(raw_id, str):
+                import re
+                digits = re.findall(r"\d+", raw_id)
+                numeric = int(digits[-1]) if digits else 0
+            else:
+                numeric = int(raw_id) if raw_id else 0
+            # Offset 1 milliard pour ne jamais collisionner avec football-data.org
+            match_id = 1_000_000_000 + numeric
+
             # Statut
             status_raw = (ev.get("status") or "").upper()
             if isinstance(status_raw, dict):
@@ -956,7 +968,7 @@ def convert_zafronix_to_internal(events: list, league_code: str, league_name: st
             kickoff = ev.get("utcDate") or ev.get("date")
 
             internal_match = {
-                "id": int(ev.get("id", 0)),
+                "id": match_id,
                 "homeTeam": {"name": home_name, "crest": home_crest},
                 "awayTeam": {"name": away_name, "crest": away_crest},
                 "utcDate": kickoff,
@@ -969,7 +981,7 @@ def convert_zafronix_to_internal(events: list, league_code: str, league_name: st
         except Exception as e:
             print(f"Erreur conversion Zafronix {ev.get('id')}: {e}")
     return converted
-
+    
 def convert_thesportsdb_to_internal(events: list, league_code: str, league_name: str) -> list:
     """Convertit le format TheSportsDB vers le format interne (football-data.org)."""
     converted = []
