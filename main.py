@@ -34,6 +34,11 @@ _PIPELINE_RUNNING = False
 ZAFRONIX_API_KEY = os.getenv("ZAFRONIX_API_KEY")
 ZAFRONIX_BASE_URL = "https://api.zafronix.com/uefa/europaleague/v1"
 ZAFRONIX_BASE_URL_MLS = "https://api.zafronix.com/usa/mls/v1"
+# Mapping des ligues Zafronix (pour eviter "Unknown" a l'insertion)
+ZAFRONIX_LEAGUES = {
+    "EL": "Europa League",
+    "MLS": "Major League Soccer",
+}
 
 COMPETITIONS = {
     "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
@@ -747,7 +752,7 @@ async def daily_pipeline():
             try:
                 code = m.get("_code", "")
                 match_id = m["id"]
-                league = COMPETITIONS.get(code, "Unknown")
+                league = COMPETITIONS.get(code, ZAFRONIX_LEAGUES.get(code, "Unknown"))
                 country = m.get("area", {}).get("name", "International")
                 home = m["homeTeam"]["name"] or m["homeTeam"].get("shortName", "?")
                 away = m["awayTeam"]["name"] or m["awayTeam"].get("shortName", "?")
