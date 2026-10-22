@@ -34,10 +34,12 @@ _PIPELINE_RUNNING = False
 ZAFRONIX_API_KEY = os.getenv("ZAFRONIX_API_KEY")
 ZAFRONIX_BASE_URL = "https://api.zafronix.com/uefa/europaleague/v1"
 ZAFRONIX_BASE_URL_MLS = "https://api.zafronix.com/usa/mls/v1"
+ZAFRONIX_BASE_URL_UECL = "https://api.zafronix.com/uefa/conferenceleague/v1"
 # Mapping des ligues Zafronix (pour eviter "Unknown" a l'insertion)
 ZAFRONIX_LEAGUES = {
     "EL": "Europa League",
     "MLS": "Major League Soccer",
+    "UECL": "Conference League",   # ← ajout
 }
 
 COMPETITIONS = {
@@ -626,7 +628,39 @@ async def fetch_zafronix_europa_league(season: int, date_from: str, date_to: str
     except Exception as e:
         print(f"Exception Zafronix EL : {e}")
         return []
+async def fetch_zafronix_conference_league(season: int, date_from: str, date_to: str):
+    """Recupere les matchs de la Conference League via Zafronix."""
+    if not ZAFRONIX_API_KEY:
+        print("ZAFRONIX_API_KEY non definie")
+        return []
 
+    url = f"{ZAFRONIX_BASE_URL_UECL}/matches"
+    headers = {"X-API-Key": ZAFRONIX_API_KEY}
+    params = {"season": season}
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=headers, params=params)
+            if r.status_code != 200:
+                print(f"Erreur Zafronix UECL : {r.status_code}")
+                return []
+
+            data = r.json()
+            events = data.get("matches") or data.get("data") or data
+
+            filtered = []
+            for ev in events:
+                ev_date = ev.get("date") or ev.get("utcDate") or ""
+                if ev_date and date_from <= ev_date[:10] <= date_to:
+                    filtered.append(ev)
+
+            print(f"Zafronix UECL : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
+            return filtered
+
+    except Exception as e:
+        print(f"Exception Zafronix UECL : {e}")
+        return []
+        
 async def fetch_zafronix_mls(season: int, date_from: str, date_to: str):
     """
     Recupere les matchs de la MLS via Zafronix.
@@ -707,6 +741,17 @@ async def daily_pipeline():
                 await asyncio.sleep(1)
             except Exception as e:
                 print(f"Erreur Zafronix EL: {e}")
+
+        # Zafronix Conference League
+        if ZAFRONIX_API_KEY:
+            try:
+                uecl_events = await fetch_zafronix_conference_league(season, date_from, date_to)
+                converted = convert_zafronix_to_internal(uecl_events, "UECL", "Conference League")
+                all_matches.extend(converted)
+                print(f"Zafronix UECL: {len(converted)} matchs")
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Erreur Zafronix UECL: {e}")
        
         # Zafronix MLS
         if ZAFRONIX_API_KEY:
@@ -1017,8 +1062,19 @@ def convert_zafronix_to_internal(events: list, league_code: str, league_name: st
                 away_goals = None
 
             # Date
-            kickoff = ev.get("utcDate") or ev.get("date")
-
+            # Date + heure (Zafronix peut renvoyer les deux separement)
+            kickoff = ev.get("utcDate") or ev.get("date") or ev.get("dateEvent")
+            time_str = (
+                ev.get("time")
+                or ev.get("strTime")
+                or ev.get("startTime")
+                or ev.get("kickoffTime")
+                or ev.get("eventTime")
+            )
+            if kickoff and "T" not in kickoff and time_str:
+                kickoff = f"{kickoff}T{time_str}"
+            if kickoff and "T" not in kickoff:
+                kickoff = f"{kickoff}T00:00:00"
             internal_match = {
                 "id": match_id,
                 "homeTeam": {"name": home_name, "crest": home_crest},
