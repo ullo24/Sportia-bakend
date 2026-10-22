@@ -39,7 +39,7 @@ COMPETITIONS = {
     "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
     "BL1": "Bundesliga", "FL1": "Ligue 1", "DED": "Eredivisie",
     "PPL": "Primeira Liga", "CL": "Champions League",
-    "EL": "Europa League",
+    # "EL": "Europa League",  # Geree par Zafronix
 }
 LEAGUE_AVG_GOALS = {
     "PL": 2.85, "PD": 2.65, "SA": 2.75, "BL1": 3.15, "FL1": 2.70,
@@ -656,7 +656,18 @@ async def daily_pipeline():
             except Exception as e:
                 print(f"Erreur API-Sports {code}: {e}")
 
-        # Dans daily_pipeline, après l'appel a l'Europa League :
+        # Zafronix Europa League
+        if ZAFRONIX_API_KEY:
+            try:
+                zaf_events = await fetch_zafronix_europa_league(season, date_from, date_to)
+                converted = convert_zafronix_to_internal(zaf_events, "EL", "Europa League")
+                all_matches.extend(converted)
+                print(f"Zafronix EL: {len(converted)} matchs")
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Erreur Zafronix EL: {e}")
+       
+        # Zafronix MLS
         if ZAFRONIX_API_KEY:
             try:
                 mls_season = today.year  # La MLS est une saison annuelle (ex: 2026)
