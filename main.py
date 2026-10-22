@@ -37,7 +37,8 @@ COMPETITIONS = {
     "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
     "BL1": "Bundesliga", "FL1": "Ligue 1", "DED": "Eredivisie",
     "PPL": "Primeira Liga", "CL": "Champions League",
-    "EC": "European Championship", "WC": "World Cup",
+    "EC": "European Championship", "WC": "World Cup", "EL": "Europa League",
+    "UECL": "Conference League",
 }
 
 LEAGUE_AVG_GOALS = {
