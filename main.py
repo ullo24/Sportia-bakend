@@ -22,11 +22,8 @@ APISPORTS_HOST = "v3.football.api-sports.io"
 
 # IDs des compétitions européennes sur API-Football
 API_FOOTBALL_LEAGUES = {
-    "CL": 2,   # Champions League
-    "EL": 3,   # Europa League
-    "UECL": 848, # Conference League (ID à vérifier sur le dashboard)
+    "CL": 2,  # Champions League uniquement (EL et UECL passent par football-data.org)
 }
-
 
 BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": API_KEY or ""}
@@ -37,10 +34,8 @@ COMPETITIONS = {
     "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
     "BL1": "Bundesliga", "FL1": "Ligue 1", "DED": "Eredivisie",
     "PPL": "Primeira Liga", "CL": "Champions League",
-    "EC": "European Championship", "WC": "World Cup", "EL": "Europa League",
-    "UECL": "Conference League",
+    "EL": "Europa League",
 }
-
 LEAGUE_AVG_GOALS = {
     "PL": 2.85, "PD": 2.65, "SA": 2.75, "BL1": 3.15, "FL1": 2.70,
     "DED": 3.20, "PPL": 2.55, "CL": 2.80, "EC": 2.60, "WC": 2.70,
@@ -620,19 +615,7 @@ async def daily_pipeline():
             except Exception as e:
                 print(f"Erreur API-Sports {code}: {e}")
 
-        # TheSportsDB (Europa League)
-        tsdb_season = f"{season}-{season + 1}"
-        try:
-            tsdb_events = await fetch_thesportsdb_europa_league(tsdb_season, date_from, date_to)
-            converted = convert_thesportsdb_to_internal(tsdb_events, "EL", "Europa League")
-            all_matches.extend(converted)
-            print(f"TheSportsDB EL: {len(converted)} matchs")
-        except Exception as e:
-            print(f"Erreur TheSportsDB EL: {e}")
-        print(str(len(all_matches)) + " matchs recuperes")
-        if not all_matches:
-            return
-
+       
         # Pause avant les standings (limite 10/min)
         await asyncio.sleep(10)
 
