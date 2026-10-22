@@ -653,18 +653,18 @@ async def daily_pipeline():
             except Exception as e:
                 print(f"Erreur API-Sports {code}: {e}")
 
-# Dans daily_pipeline, après l'appel a l'Europa League :
-if ZAFRONIX_API_KEY:
-    try:
-        mls_season = today.year  # La MLS est une saison annuelle (ex: 2026)
-        mls_events = await fetch_zafronix_mls(mls_season, date_from, date_to)
-        converted = convert_zafronix_to_internal(mls_events, "MLS", "Major League Soccer")
-        all_matches.extend(converted)
-        await asyncio.sleep(1)
-    except Exception as e:
-        print(f"Erreur Zafronix MLS: {e}")
+        # Dans daily_pipeline, après l'appel a l'Europa League :
+        if ZAFRONIX_API_KEY:
+            try:
+                mls_season = today.year  # La MLS est une saison annuelle (ex: 2026)
+                mls_events = await fetch_zafronix_mls(mls_season, date_from, date_to)
+                converted = convert_zafronix_to_internal(mls_events, "MLS", "Major League Soccer")
+                all_matches.extend(converted)
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Erreur Zafronix MLS: {e}")
         # Pause avant les standings (limite 10/min)
-        await asyncio.sleep(10)
+                await asyncio.sleep(10)
 
         print("Recuperation des stats d'equipes...")
         for code, league_name in COMPETITIONS.items():
