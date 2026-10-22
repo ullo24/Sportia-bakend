@@ -1,0 +1,20 @@
+name: sportia_predict
+description: SportIA Predict - Prédictions sportives IA
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  intl: ^0.19.0
+  cupertino_icons: ^1.0.6
+  shared_preferences: ^2.2.2
+  flutter_lints: ^4.0.0
+
+
+flutter:
+  uses-material-design: true
