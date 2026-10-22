@@ -558,6 +558,34 @@ async def fetch_apisports_matches(league_id: int, season: int, date_from: str, d
         print(f"Exception API-Sports {league_id}: {e}")
         return []
 
+THESPORTSDB_BASE = "https://www.thesportsdb.com/api/v1/json/3"
+
+async def fetch_thesportsdb_europa_league(season: str, date_from: str, date_to: str):
+    """
+    Recupere les matchs de l'Europa League via TheSportsDB (gratuit).
+    season au format '2025-2026'.
+    """
+    url = f"{THESPORTSDB_BASE}/eventsseason.php"
+    params = {"id": 4481, "s": season}
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url, params=params)
+            if r.status_code != 200:
+                print(f"Erreur TheSportsDB EL : {r.status_code}")
+                return []
+            data = r.json()
+            events = data.get("events") or []
+            # Filtre par date
+            filtered = []
+            for ev in events:
+                ev_date = ev.get("dateEvent")
+                if ev_date and date_from <= ev_date <= date_to:
+                    filtered.append(ev)
+            return filtered
+    except Exception as e:
+        print(f"Exception TheSportsDB EL : {e}")
+        return []
+
 async def daily_pipeline():
     global _PIPELINE_RUNNING
     if _PIPELINE_RUNNING:
@@ -592,6 +620,15 @@ async def daily_pipeline():
             except Exception as e:
                 print(f"Erreur API-Sports {code}: {e}")
 
+        # TheSportsDB (Europa League)
+        tsdb_season = f"{season}-{season + 1}"
+        try:
+            tsdb_events = await fetch_thesportsdb_europa_league(tsdb_season, date_from, date_to)
+            converted = convert_thesportsdb_to_internal(tsdb_events, "EL", "Europa League")
+            all_matches.extend(converted)
+            print(f"TheSportsDB EL: {len(converted)} matchs")
+        except Exception as e:
+            print(f"Erreur TheSportsDB EL: {e}")
         print(str(len(all_matches)) + " matchs recuperes")
         if not all_matches:
             return
@@ -836,6 +873,48 @@ def convert_apisports_to_internal(api_matches: list, league_code: str, league_na
             converted.append(internal_match)
         except Exception as e:
             print(f"Erreur conversion match {match.get('fixture', {}).get('id')}: {e}")
+    return converted
+
+def convert_thesportsdb_to_internal(events: list, league_code: str, league_name: str) -> list:
+    """Convertit le format TheSportsDB vers le format interne (football-data.org)."""
+    converted = []
+    for ev in events:
+        try:
+            # Statut
+            status_str = (ev.get("strStatus") or "").upper()
+            if status_str in ["FT", "AET", "PEN", "FINISHED"]:
+                status = "FINISHED"
+            elif status_str in ["1H", "2H", "HT", "LIVE"]:
+                status = "IN_PLAY"
+            else:
+                status = "SCHEDULED"
+
+            home_team = ev.get("strHomeTeam") or "?"
+            away_team = ev.get("strAwayTeam") or "?"
+            home_score = ev.get("intHomeScore")
+            away_score = ev.get("intAwayScore")
+
+            # Date au format ISO
+            date_str = ev.get("dateEvent")
+            time_str = ev.get("strTime") or "00:00:00"
+            kickoff = f"{date_str}T{time_str}Z" if date_str else None
+
+            internal_match = {
+                "id": int(ev.get("idEvent", 0)),
+                "homeTeam": {"name": home_team, "crest": ev.get("strHomeTeamBadge")},
+                "awayTeam": {"name": away_team, "crest": ev.get("strAwayTeamBadge")},
+                "utcDate": kickoff,
+                "status": status,
+                "score": {
+                    "fullTime": {"home": int(home_score) if home_score else None,
+                                 "away": int(away_score) if away_score else None}
+                },
+                "league": {"name": league_name, "country": "Europe"},
+                "_code": league_code,
+            }
+            converted.append(internal_match)
+        except Exception as e:
+            print(f"Erreur conversion TheSportsDB {ev.get('idEvent')}: {e}")
     return converted
 
 async def fetch_top_teams(code: str, top_n: int):
