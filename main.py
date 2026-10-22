@@ -1,4 +1,3 @@
-ZAFRONIX_BASE_URL_MLS = "https://api.zafronix.com/usa/mls/v1"
 import os
 import math
 import json
@@ -31,6 +30,10 @@ BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": API_KEY or ""}
 DB_PATH = "/tmp/sportia.db"
 _PIPELINE_RUNNING = False
+# Zafronix
+ZAFRONIX_API_KEY = os.getenv("ZAFRONIX_API_KEY")
+ZAFRONIX_BASE_URL = "https://api.zafronix.com/uefa/europaleague/v1"
+ZAFRONIX_BASE_URL_MLS = "https://api.zafronix.com/usa/mls/v1"
 
 COMPETITIONS = {
     "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
