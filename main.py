@@ -908,6 +908,68 @@ def convert_apisports_to_internal(api_matches: list, league_code: str, league_na
             print(f"Erreur conversion match {match.get('fixture', {}).get('id')}: {e}")
     return converted
 
+def convert_zafronix_to_internal(events: list, league_code: str, league_name: str) -> list:
+    """Convertit le format Zafronix vers le format interne (football-data.org)."""
+    converted = []
+    for ev in events:
+        try:
+            # Statut
+            status_raw = (ev.get("status") or "").upper()
+            if isinstance(status_raw, dict):
+                status_raw = (status_raw.get("short") or "").upper()
+            if status_raw in ["FINISHED", "FT", "AET", "PEN"]:
+                status = "FINISHED"
+            elif status_raw in ["LIVE", "IN_PLAY", "1H", "2H", "HT"]:
+                status = "IN_PLAY"
+            else:
+                status = "SCHEDULED"
+
+            # Equipes
+            home_team = ev.get("homeTeam") or ev.get("home") or {}
+            away_team = ev.get("awayTeam") or ev.get("away") or {}
+
+            if isinstance(home_team, str):
+                home_name = home_team
+                home_crest = None
+            else:
+                home_name = home_team.get("name") or home_team.get("shortName") or "?"
+                home_crest = home_team.get("crest") or home_team.get("logo")
+
+            if isinstance(away_team, str):
+                away_name = away_team
+                away_crest = None
+            else:
+                away_name = away_team.get("name") or away_team.get("shortName") or "?"
+                away_crest = away_team.get("crest") or away_team.get("logo")
+
+            # Score
+            score = ev.get("score") or {}
+            if isinstance(score, dict):
+                full_time = score.get("fullTime") or score
+                home_goals = full_time.get("home")
+                away_goals = full_time.get("away")
+            else:
+                home_goals = None
+                away_goals = None
+
+            # Date
+            kickoff = ev.get("utcDate") or ev.get("date")
+
+            internal_match = {
+                "id": int(ev.get("id", 0)),
+                "homeTeam": {"name": home_name, "crest": home_crest},
+                "awayTeam": {"name": away_name, "crest": away_crest},
+                "utcDate": kickoff,
+                "status": status,
+                "score": {"fullTime": {"home": home_goals, "away": away_goals}},
+                "league": {"name": league_name, "country": "International"},
+                "_code": league_code,
+            }
+            converted.append(internal_match)
+        except Exception as e:
+            print(f"Erreur conversion Zafronix {ev.get('id')}: {e}")
+    return converted
+
 def convert_thesportsdb_to_internal(events: list, league_code: str, league_name: str) -> list:
     """Convertit le format TheSportsDB vers le format interne (football-data.org)."""
     converted = []
