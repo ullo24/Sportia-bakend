@@ -1,3 +1,4 @@
+ZAFRONIX_BASE_URL_MLS = "https://api.zafronix.com/usa/mls/v1"
 import os
 import math
 import json
@@ -10,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
+
 
 load_dotenv()
 
@@ -581,6 +583,42 @@ async def fetch_thesportsdb_europa_league(season: str, date_from: str, date_to: 
         print(f"Exception TheSportsDB EL : {e}")
         return []
 
+async def fetch_zafronix_mls(season: int, date_from: str, date_to: str):
+    """
+    Recupere les matchs de la MLS via Zafronix.
+    L'endpoint renvoie toute la saison, on filtre par date cote Python.
+    """
+    if not ZAFRONIX_API_KEY:
+        print("ZAFRONIX_API_KEY non definie")
+        return []
+
+    url = f"{ZAFRONIX_BASE_URL_MLS}/matches"
+    headers = {"X-API-Key": ZAFRONIX_API_KEY}
+    params = {"season": season}
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=headers, params=params)
+            if r.status_code != 200:
+                print(f"Erreur Zafronix MLS : {r.status_code}")
+                return []
+
+            data = r.json()
+            events = data.get("matches") or data.get("data") or data
+
+            filtered = []
+            for ev in events:
+                ev_date = ev.get("date") or ev.get("utcDate") or ""
+                if ev_date and date_from <= ev_date[:10] <= date_to:
+                    filtered.append(ev)
+
+            print(f"Zafronix MLS : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
+            return filtered
+
+    except Exception as e:
+        print(f"Exception Zafronix MLS : {e}")
+        return []
+
 async def daily_pipeline():
     global _PIPELINE_RUNNING
     if _PIPELINE_RUNNING:
@@ -615,7 +653,16 @@ async def daily_pipeline():
             except Exception as e:
                 print(f"Erreur API-Sports {code}: {e}")
 
-       
+# Dans daily_pipeline, après l'appel a l'Europa League :
+if ZAFRONIX_API_KEY:
+    try:
+        mls_season = today.year  # La MLS est une saison annuelle (ex: 2026)
+        mls_events = await fetch_zafronix_mls(mls_season, date_from, date_to)
+        converted = convert_zafronix_to_internal(mls_events, "MLS", "Major League Soccer")
+        all_matches.extend(converted)
+        await asyncio.sleep(1)
+    except Exception as e:
+        print(f"Erreur Zafronix MLS: {e}")
         # Pause avant les standings (limite 10/min)
         await asyncio.sleep(10)
 
