@@ -586,6 +586,42 @@ async def fetch_thesportsdb_europa_league(season: str, date_from: str, date_to: 
         print(f"Exception TheSportsDB EL : {e}")
         return []
 
+async def fetch_zafronix_europa_league(season: int, date_from: str, date_to: str):
+    """
+    Recupere les matchs de l'Europa League via Zafronix.
+    L'endpoint renvoie toute la saison, on filtre par date cote Python.
+    """
+    if not ZAFRONIX_API_KEY:
+        print("ZAFRONIX_API_KEY non definie")
+        return []
+
+    url = f"{ZAFRONIX_BASE_URL}/matches"
+    headers = {"X-API-Key": ZAFRONIX_API_KEY}
+    params = {"season": season}
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=headers, params=params)
+            if r.status_code != 200:
+                print(f"Erreur Zafronix EL : {r.status_code}")
+                return []
+
+            data = r.json()
+            events = data.get("matches") or data.get("data") or data
+
+            filtered = []
+            for ev in events:
+                ev_date = ev.get("date") or ev.get("utcDate") or ""
+                if ev_date and date_from <= ev_date[:10] <= date_to:
+                    filtered.append(ev)
+
+            print(f"Zafronix EL : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
+            return filtered
+
+    except Exception as e:
+        print(f"Exception Zafronix EL : {e}")
+        return []
+
 async def fetch_zafronix_mls(season: int, date_from: str, date_to: str):
     """
     Recupere les matchs de la MLS via Zafronix.
