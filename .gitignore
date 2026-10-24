@@ -1,0 +1,7 @@
+.env
+.env.local
+__pycache__/
+*.pyc
+backtest/history.db
+backtest/results/
+.DS_Store

@@ -20,20 +20,18 @@ MIN_HISTORY = 5
 
 
 def _load_predictor(engine):
-    if engine == "v1":
-        from ai.poisson_v1 import predict_match_v1 as fn
-    elif engine == "v2a":
-        from ai.poisson_v2a import predict_match_v2a as fn
-    elif engine == "v2b":
-        from ai.poisson_v2b import predict_match_v2b as fn
-    elif engine == "v2c":
-        from ai.poisson_v2c import predict_match_v2c as fn
-    elif engine == "v2d":
-        from ai.poisson_v2d import predict_match_v2d as fn
-    else:
-        raise SystemExit(f"Engine inconnu : {engine}")
-    return fn
-
+    """Import dynamique : ai.poisson_<engine> → predict_match_<engine>."""
+    import importlib
+    try:
+        mod = importlib.import_module(f"ai.poisson_{engine}")
+        fn = getattr(mod, f"predict_match_{engine}")
+        return fn
+    except (ModuleNotFoundError, AttributeError) as e:
+        raise SystemExit(
+            f"Engine inconnu : {engine} ({e}). "
+            f"Vérifie que ai/poisson_{engine}.py existe et définit "
+            f"predict_match_{engine}."
+        )
 
 def run(engine="v1", min_date=None):
     predictor = _load_predictor(engine)
