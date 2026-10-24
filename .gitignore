@@ -1,0 +1,7 @@
+.env
+.env.local
+__pycache__/
+*.pyc
+ai/
+backtest/
+.DS_Store
