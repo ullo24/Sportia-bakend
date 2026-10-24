@@ -5,7 +5,7 @@ Usage :
   python -m backtest.run v2a             # après fix HOME_ADVANTAGE
   python -m backtest.run v2b             # après split domicile/extérieur
   ...
-"""
+""" 
 import json
 import sys
 from pathlib import Path
