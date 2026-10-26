@@ -18,17 +18,21 @@ API_KEY = os.getenv("FOOTBALL_DATA_KEY")
 if not API_KEY:
     print("ATTENTION : FOOTBALL_DATA_KEY n'est pas definie !")
 
-APISPORTS_KEY = os.getenv("APISPORTS_KEY")
-APISPORTS_HOST = "v3.football.api-sports.io"
+# ===== FOOTBALL-CHARTS.COM CONFIG =====
+FC_API_KEY = os.getenv("FC_API_KEY")
+FC_BASE_URL = "https://footballcharts-backend.onrender.com/api/v1"
+FC_LEAGUES = {
+    "SAU": "saudi1",
+    "JPN": "japan1",
+    "KOR": "korea1",
+}
 
-# IDs des compétitions gérées par API-Football
-# MLS est géré par Zafronix (voir plus bas)
-API_FOOTBALL_LEAGUES = {
-    "CL": 2,       # Champions League
-    "SAU": 4633,   # Saudi Pro League
-    "JPN": 98,     # J1 League (Japon)
-    "KOR": 292,    # K League 1 (Corée)
-    "ARG": 128,    # Argentine Primera División
+# ===== GOAL API CONFIG (Argentine + Chine) =====
+GOAL_API_KEY = os.getenv("GOAL_API_KEY")
+GOAL_API_BASE_URL = "https://api.goal-api.com/v1"
+GOAL_API_LEAGUES = {
+    "ARG": "cmr77dvtc0093rx0667jirsnv",   # Argentina Liga Profesional
+    "CHN": "cmr77dvlv0067rx06potai161",   # Chinese Super League
 }
 
 BASE_URL = "https://api.football-data.org/v4"
@@ -36,7 +40,7 @@ HEADERS = {"X-Auth-Token": API_KEY or ""}
 DB_PATH = "/tmp/sportia.db"
 _PIPELINE_RUNNING = False
 
-# Zafronix : EL, UECL, MLS
+# Zafronix
 ZAFRONIX_API_KEY = os.getenv("ZAFRONIX_API_KEY")
 ZAFRONIX_BASE_URL = "https://api.zafronix.com/uefa/europaleague/v1"
 ZAFRONIX_BASE_URL_MLS = "https://api.zafronix.com/usa/mls/v1"
@@ -58,10 +62,8 @@ LEAGUE_AVG_GOALS = {
     "PL": 2.85, "PD": 2.65, "SA": 2.75, "BL1": 3.15, "FL1": 2.70,
     "DED": 3.20, "PPL": 2.55, "CL": 2.80, "EC": 2.60, "WC": 2.70,
     "BSA": 2.75,
-    "SAU": 2.95,
-    "JPN": 2.65,
-    "KOR": 2.55,
-    "ARG": 2.70,
+    "SAU": 2.95, "JPN": 2.65, "KOR": 2.55,
+    "ARG": 2.70, "CHN": 2.80,
     "MLS": 2.90,
 }
 
@@ -81,7 +83,7 @@ _STANDINGS_CACHE = {}
 MIGRATE_DB = False
 
 
-# ===== APP SETUP (doit etre defini AVANT les routes) =====
+# ===== APP SETUP =====
 
 scheduler = AsyncIOScheduler()
 
@@ -214,10 +216,8 @@ def _clean_team_name(name: str) -> str:
 
 
 async def _lookup_logo_thesportsdb(team_name: str) -> str:
-    """Cherche un logo via TheSportsDB, avec plusieurs variantes du nom."""
     url = "https://www.thesportsdb.com/api/v1/json/3/searchteams.php"
     variants = [team_name, _clean_team_name(team_name)]
-    # Dédoublonner
     seen = set()
     variants = [v for v in variants if v and not (v.lower() in seen or seen.add(v.lower()))]
 
@@ -239,29 +239,20 @@ async def _lookup_logo_thesportsdb(team_name: str) -> str:
 
 
 async def get_team_logo(team_data: dict, force_lookup: bool = False) -> str:
-    """
-    Récupère le logo d'une équipe.
-    - Si crest fourni par l'API : on l'utilise
-    - Sinon : on cherche via TheSportsDB (avec cache)
-    - force_lookup=True : ignore le crest de l'API et force TheSportsDB
-    """
     team_name = team_data.get("name") or team_data.get("shortName", "")
     if not team_name:
         return ""
 
-    # 1. Cache
     conn = db()
     row = conn.execute("SELECT logo FROM team_logos WHERE team=?", (team_name,)).fetchone()
     conn.close()
     if row and row["logo"]:
         return row["logo"]
 
-    # 2. Crest de l'API (sauf si force_lookup)
     crest = team_data.get("crest")
     if crest and not force_lookup:
         if not crest.endswith('.svg'):
             crest = crest.rsplit('.', 1)[0] + '.svg'
-        # Sauvegarder en cache
         conn = db()
         conn.execute(
             "INSERT OR REPLACE INTO team_logos (team, logo) VALUES (?, ?)",
@@ -271,7 +262,6 @@ async def get_team_logo(team_data: dict, force_lookup: bool = False) -> str:
         conn.close()
         return crest
 
-    # 3. TheSportsDB
     logo = await _lookup_logo_thesportsdb(team_name)
     if logo:
         conn = db()
@@ -311,13 +301,12 @@ def _form_factor(form_str):
 
 
 def calc_expected_goals_v2e(league_code: str, home_team: str, away_team: str):
-    """v2e : Poisson + Dixon-Coles + shrinkage bayesien (K=10, rho=-0.05)."""
     base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
     conn = db()
     league_name = COMPETITIONS.get(league_code, ZAFRONIX_LEAGUES.get(league_code, ""))
     allow_any_league = league_code in [
         "CL", "EL", "UECL", "EC", "WC",
-        "SAU", "JPN", "KOR", "ARG", "MLS",
+        "SAU", "JPN", "KOR", "ARG", "CHN", "MLS",
     ]
     prefixes = _TEAM_NAME_PREFIXES
 
@@ -541,6 +530,155 @@ def generate_analysis(match: dict) -> str:
     ])
 
 
+# ===== GOAL API FETCH (Argentine + Chine) =====
+
+async def fetch_goal_api_fixtures(league_id: str, date_from: str, date_to: str):
+    """Récupère les fixtures via GOAL API, filtre par date."""
+    if not GOAL_API_KEY:
+        print("GOAL_API_KEY non definie")
+        return []
+    url = f"{GOAL_API_BASE_URL}/leagues/{league_id}/fixtures"
+    headers = {"Authorization": f"Bearer {GOAL_API_KEY}"}
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url, headers=headers)
+            if r.status_code != 200:
+                print(f"Erreur GOAL API {league_id}: HTTP {r.status_code}")
+                return []
+            data = r.json()
+            if not data.get("success"):
+                print(f"Erreur GOAL API {league_id}: {data.get('message', 'unknown')}")
+                return []
+            fixtures = data.get("data", [])
+            # data peut être une liste directe ou un objet avec pagination
+            if isinstance(fixtures, dict):
+                fixtures = fixtures.get("fixtures", [])
+            filtered = []
+            for f in fixtures:
+                kickoff = f.get("kickoffUtc") or f.get("matchDate")
+                if kickoff and isinstance(kickoff, str):
+                    d = kickoff[:10]
+                    if date_from <= d <= date_to:
+                        filtered.append(f)
+                else:
+                    filtered.append(f)
+            print(f"GOAL API {league_id}: {len(fixtures)} bruts, {len(filtered)} dans la fenetre")
+            return filtered
+    except Exception as e:
+        print(f"Exception GOAL API {league_id}: {e}")
+        return []
+
+
+def convert_goal_api_to_internal(fixtures: list, league_code: str, league_name: str) -> list:
+    """Convertit le format GOAL API vers le format interne."""
+    converted = []
+    for f in fixtures:
+        try:
+            home = f.get("homeTeamName") or f.get("homeTeam", {}).get("name") or "?"
+            away = f.get("awayTeamName") or f.get("awayTeam", {}).get("name") or "?"
+            kickoff = f.get("kickoffUtc") or f.get("matchDate")
+            if not kickoff:
+                continue
+            if isinstance(kickoff, str) and "T" not in kickoff:
+                kickoff = kickoff + "T00:00:00"
+            status_raw = (f.get("matchStatus") or "SCHEDULED").upper()
+            if status_raw in ["LIVE", "IN_PLAY", "1H", "2H", "HT"]:
+                status = "IN_PLAY"
+            elif status_raw in ["FINISHED", "FT"]:
+                status = "FINISHED"
+            else:
+                status = "SCHEDULED"
+            slug = f.get("id") or f"{league_code}-{home}-{away}-{kickoff[:10]}"
+            match_id = abs(hash(slug)) % (10**12) + 3_000_000_000
+            internal_match = {
+                "id": match_id,
+                "homeTeam": {"name": home, "crest": None},
+                "awayTeam": {"name": away, "crest": None},
+                "utcDate": kickoff,
+                "status": status,
+                "score": {
+                    "fullTime": {
+                        "home": f.get("homeScore"),
+                        "away": f.get("awayScore"),
+                    }
+                },
+                "league": {"name": league_name, "country": "International"},
+                "_code": league_code,
+            }
+            converted.append(internal_match)
+        except Exception as e:
+            print(f"Erreur conversion GOAL API {f.get('id')}: {e}")
+    return converted
+
+
+# ===== FOOTBALL-CHARTS FETCH =====
+
+async def fetch_footballcharts_fixtures(league_key: str, date_from: str, date_to: str):
+    url = f"{FC_BASE_URL}/leagues/{league_key}/fixtures/"
+    headers = {}
+    if FC_API_KEY:
+        headers["Authorization"] = f"Bearer {FC_API_KEY}"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url, headers=headers)
+            if r.status_code != 200:
+                print(f"Erreur Football-Charts {league_key}: HTTP {r.status_code}")
+                return []
+            data = r.json()
+            fixtures = data if isinstance(data, list) else data.get("fixtures", [])
+            filtered = []
+            for f in fixtures:
+                kickoff = (f.get("kickoff_utc") or f.get("kickoff") or
+                           f.get("date") or f.get("datetime"))
+                if kickoff and isinstance(kickoff, str):
+                    d = kickoff[:10]
+                    if date_from <= d <= date_to:
+                        filtered.append(f)
+                else:
+                    filtered.append(f)
+            print(f"Football-Charts {league_key}: {len(fixtures)} bruts, {len(filtered)} dans la fenetre")
+            return filtered
+    except Exception as e:
+        print(f"Exception Football-Charts {league_key}: {e}")
+        return []
+
+
+def convert_footballcharts_to_internal(fixtures: list, league_code: str, league_name: str) -> list:
+    converted = []
+    for f in fixtures:
+        try:
+            home = (f.get("home") or f.get("home_team") or f.get("homeTeam") or
+                    f.get("home_name") or "?")
+            away = (f.get("away") or f.get("away_team") or f.get("awayTeam") or
+                    f.get("away_name") or "?")
+            if isinstance(home, dict):
+                home = home.get("name", "?")
+            if isinstance(away, dict):
+                away = away.get("name", "?")
+            kickoff = (f.get("kickoff_utc") or f.get("kickoff") or
+                       f.get("date") or f.get("datetime") or f.get("start_time"))
+            if not kickoff:
+                continue
+            if isinstance(kickoff, str) and "T" not in kickoff:
+                kickoff = kickoff + "T00:00:00"
+            slug = f.get("slug") or f.get("id") or f"{league_code}-{home}-{away}-{kickoff[:10]}"
+            match_id = abs(hash(slug)) % (10**12) + 2_000_000_000
+            internal_match = {
+                "id": match_id,
+                "homeTeam": {"name": home, "crest": None},
+                "awayTeam": {"name": away, "crest": None},
+                "utcDate": kickoff,
+                "status": "SCHEDULED",
+                "score": {"fullTime": {"home": None, "away": None}},
+                "league": {"name": league_name, "country": "International"},
+                "_code": league_code,
+            }
+            converted.append(internal_match)
+        except Exception as e:
+            print(f"Erreur conversion Football-Charts {f.get('slug')}: {e}")
+    return converted
+
+
 # ===== PIPELINE =====
 
 async def fetch_competition_matches(code: str, date_from: str, date_to: str):
@@ -557,26 +695,6 @@ async def fetch_competition_matches(code: str, date_from: str, date_to: str):
         except Exception as e:
             print("Exception " + code + " : " + str(e))
             return []
-
-
-async def fetch_apisports_matches(league_id: int, season: int, date_from: str, date_to: str):
-    url = f"https://{APISPORTS_HOST}/fixtures"
-    headers = {"x-apisports-key": APISPORTS_KEY or ""}
-    params = {"league": league_id, "season": season, "from": date_from, "to": date_to, "timezone": "UTC"}
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(url, headers=headers, params=params)
-            if r.status_code != 200:
-                print(f"Erreur HTTP API-Sports {league_id}: {r.status_code}")
-                return []
-            data = r.json()
-            if data.get("errors"):
-                print(f"Erreur API-Sports {league_id}: {data['errors']}")
-                return []
-            return data.get("response", [])
-    except Exception as e:
-        print(f"Exception API-Sports {league_id}: {e}")
-        return []
 
 
 async def fetch_zafronix_europa_league(season: int, date_from: str, date_to: str):
@@ -658,43 +776,6 @@ async def fetch_zafronix_mls(season: int, date_from: str, date_to: str):
     except Exception as e:
         print(f"Exception Zafronix MLS : {e}")
         return []
-
-
-def convert_apisports_to_internal(api_matches: list, league_code: str, league_name: str) -> list:
-    converted = []
-    for match in api_matches:
-        try:
-            fixture = match.get("fixture", {})
-            teams = match.get("teams", {})
-            status_short = fixture.get("status", {}).get("short", "NS")
-            if status_short not in ["NS", "TBD", "1H", "HT", "2H", "ET", "BT", "P"]:
-                continue
-            if status_short == "NS":
-                status = "TIMED"
-            elif status_short == "TBD":
-                status = "SCHEDULED"
-            else:
-                status = "IN_PLAY"
-            internal_match = {
-                "id": fixture.get("id"),
-                "homeTeam": {
-                    "name": teams.get("home", {}).get("name"),
-                    "crest": teams.get("home", {}).get("logo"),
-                },
-                "awayTeam": {
-                    "name": teams.get("away", {}).get("name"),
-                    "crest": teams.get("away", {}).get("logo"),
-                },
-                "utcDate": fixture.get("date"),
-                "status": status,
-                "score": {"fullTime": {"home": None, "away": None}},
-                "league": {"name": league_name, "country": "International"},
-                "_code": league_code,
-            }
-            converted.append(internal_match)
-        except Exception as e:
-            print(f"Erreur conversion match {match.get('fixture', {}).get('id')}: {e}")
-    return converted
 
 
 def convert_zafronix_to_internal(events: list, league_code: str, league_name: str) -> list:
@@ -796,20 +877,36 @@ async def daily_pipeline():
             all_matches.extend(matches)
             await asyncio.sleep(7)
 
-        # === API-Football ===
-        season = today.year
-        if today.month < 7:
-            season -= 1
-        for code, league_id in API_FOOTBALL_LEAGUES.items():
-            league_name = COMPETITIONS.get(code, code)
+        # === Football-Charts.com (SAU, JPN, KOR) ===
+        for code, league_key in FC_LEAGUES.items():
+            league_name = {
+                "SAU": "Saudi Pro League",
+                "JPN": "J1 League",
+                "KOR": "K League 1",
+            }.get(code, code)
             try:
-                api_matches = await fetch_apisports_matches(league_id, season, date_from, date_to)
-                converted = convert_apisports_to_internal(api_matches, code, league_name)
+                fixtures = await fetch_footballcharts_fixtures(league_key, date_from, date_to)
+                converted = convert_footballcharts_to_internal(fixtures, code, league_name)
                 all_matches.extend(converted)
-                print(f"API-Sports {code}: {len(converted)} matchs")
-                await asyncio.sleep(3)
+                print(f"Football-Charts {code}: {len(converted)} matchs")
+                await asyncio.sleep(1)
             except Exception as e:
-                print(f"Erreur API-Sports {code}: {e}")
+                print(f"Erreur Football-Charts {code}: {e}")
+
+        # === GOAL API (ARG, CHN) ===
+        for code, league_id in GOAL_API_LEAGUES.items():
+            league_name = {
+                "ARG": "Liga Profesional Argentina",
+                "CHN": "Chinese Super League",
+            }.get(code, code)
+            try:
+                fixtures = await fetch_goal_api_fixtures(league_id, date_from, date_to)
+                converted = convert_goal_api_to_internal(fixtures, code, league_name)
+                all_matches.extend(converted)
+                print(f"GOAL API {code}: {len(converted)} matchs")
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Erreur GOAL API {code}: {e}")
 
         # === Zafronix : EL, UECL, MLS ===
         if ZAFRONIX_API_KEY:
@@ -862,8 +959,7 @@ async def daily_pipeline():
                 away_team = m["awayTeam"]
                 home_name = home_team.get("name") or home_team.get("shortName", "?")
                 away_name = away_team.get("name") or away_team.get("shortName", "?")
-                # Pour les ligues sans crest fiable (MLS, SAU, JPN, KOR, ARG), forcer TheSportsDB
-                force = code in ["MLS", "SAU", "JPN", "KOR", "ARG"]
+                force = code in ["MLS", "SAU", "JPN", "KOR", "ARG", "CHN"]
                 if home_name not in logos:
                     logos[home_name] = await get_team_logo(home_team, force_lookup=force)
                 if away_name not in logos:
@@ -881,6 +977,17 @@ async def daily_pipeline():
                 code = m.get("_code", "")
                 match_id = m["id"]
                 league = COMPETITIONS.get(code, ZAFRONIX_LEAGUES.get(code, "Unknown"))
+                if code in FC_LEAGUES:
+                    league = {
+                        "SAU": "Saudi Pro League",
+                        "JPN": "J1 League",
+                        "KOR": "K League 1",
+                    }.get(code, code)
+                if code in GOAL_API_LEAGUES:
+                    league = {
+                        "ARG": "Liga Profesional Argentina",
+                        "CHN": "Chinese Super League",
+                    }.get(code, code)
                 country = m.get("area", {}).get("name", "International")
                 home = m["homeTeam"]["name"] or m["homeTeam"].get("shortName", "?")
                 away = m["awayTeam"]["name"] or m["awayTeam"].get("shortName", "?")
