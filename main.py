@@ -1768,11 +1768,11 @@ def get_leagues():
 
 
         # === ENRICHISSEMENT : evaluation de chaque pick ===
-        match_map = {dict(r)["id"]: dict(r) for r in rows}
+match_map = {dict(r)["id"]: dict(r) for r in rows}
 
-        def enrich_picks(picks):
-            for p in picks:
-                match = match_map.get(p["match_id"])
+def enrich_picks(picks):
+        for p in picks:
+            match = match_map.get(p["match_id"])
                 if match:
                     try:
                         ev = _evaluate_pick(p, match)
@@ -1795,9 +1795,9 @@ def get_leagues():
         medium = enrich_picks(medium)
         risky_list = enrich_picks(risky_list)
 
-        def safe_cote(lst):
-            try:
-                return _calc_total_cote(lst) if lst else 1.0
+def safe_cote(lst):
+    try:
+        return _calc_total_cote(lst) if lst else 1.0
             except Exception:
                 return 1.0
 
