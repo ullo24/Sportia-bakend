@@ -60,6 +60,7 @@ LEAGUE_TOP_N = {
 }
 
 _STANDINGS_CACHE = {}
+_H2H_CACHE = {}
 MIGRATE_DB = False
 
 
@@ -1173,6 +1174,7 @@ def _all_picks_for_match(m):
             "market": label, "description": desc,
             "proba": round(prob, 4), "cote": round(cote, 2),
             "group": _MARKET_GROUP.get(label, "other"),
+            "confidence": m.get("confidence") or 0.5,
         })
     return picks
 
@@ -1299,6 +1301,72 @@ def _calc_risky_pick(m):
         "market": best[0], "description": best[1],
         "proba": round(best[2], 3), "cote": round(best[3], 2),
     }
+
+
+def _check_won_markets(m):
+    if m.get("status") != "FINISHED":
+        return []
+    hg = m.get("home_goals")
+    ag = m.get("away_goals")
+    if hg is None or ag is None:
+        return []
+    total = hg + ag
+    won = []
+
+    def add(label, desc, prob):
+        if prob is None or prob < 0.55:
+            return
+        won.append({
+            "market": label, "description": desc,
+            "proba": round(prob, 3),
+            "cote": round(1.0 / prob, 2) if prob > 0 else None,
+        })
+
+    if hg > ag:
+        add("1", m["home"], m.get("home_win", 0))
+    elif hg == ag:
+        add("X", "Match nul", m.get("draw", 0))
+    else:
+        add("2", m["away"], m.get("away_win", 0))
+    if total > 0.5:
+        add("+0.5", "Over 0.5 but", m.get("over_05", 0))
+    if total > 1.5:
+        add("+1.5", "+1.5 buts", m.get("over_15", 0))
+    if total > 2.5:
+        add("+2.5", "+2.5 buts", m.get("over_25", 0))
+    if total < 3.5:
+        add("-3.5", "-3.5 buts", m.get("under_35", 0))
+    if total < 4.5:
+        add("-4.5", "-4.5 buts", m.get("under_45", 0))
+    if hg > 0 and ag > 0:
+        add("BTTS", "Les 2 marquent", m.get("btts_yes", 0))
+        if total > 2.5:
+            add("BTTS+2.5", "BTTS & Over 2.5", m.get("btts_over_25", 0))
+        if total < 3.5:
+            add("BTTS-3.5", "BTTS & Under 3.5", m.get("btts_under_35", 0))
+    if hg >= ag:
+        add("1X", "Double Chance 1X", m.get("dc_1x", 0))
+    if hg != ag:
+        add("12", "Double Chance 12", m.get("dc_12", 0))
+    if hg <= ag:
+        add("X2", "Double Chance X2", m.get("dc_x2", 0))
+    if hg > ag:
+        add("DNB D", "Draw No Bet Domicile", m.get("dnb_home", 0))
+    elif hg < ag:
+        add("DNB E", "Draw No Bet Exterieur", m.get("dnb_away", 0))
+    if hg - ag >= 2:
+        add("H-1 D", "Handicap -1 Domicile", m.get("handicap_home_minus1", 0))
+    if ag - hg >= 2:
+        add("H-1 E", "Handicap -1 Exterieur", m.get("handicap_away_minus1", 0))
+    if hg - ag >= -1:
+        add("H+1 D", "Handicap +1 Domicile", m.get("handicap_home_plus1", 0))
+    if ag - hg >= -1:
+        add("H+1 E", "Handicap +1 Exterieur", m.get("handicap_away_plus1", 0))
+    if hg > 0:
+        add("Dom. marque", "Domicile marque", m.get("home_scores", 0))
+    if ag > 0:
+        add("Ext. marque", "Exterieur marque", m.get("away_scores", 0))
+    return won
 
 
 # ===== ROUTES =====
@@ -1432,27 +1500,66 @@ def get_tickets(day: str):
         if not all_picks:
             return {"error": "Aucun pick disponible", "date": day}
 
+        # === SAFE : cote ~2.5, confidence >= 0.70, 2-3 picks ===
+        safe_pool = [p for p in all_picks if p.get("confidence", 0) >= 0.70]
         safe = _build_ticket_optimized(
-            all_picks, target_cote=2.0, min_n=2, max_n=3,
-            min_proba=0.65, max_per_market=2, max_per_group=2,
+            safe_pool,
+            target_cote=2.5,
+            min_n=2, max_n=3,
+            min_proba=0.55,
+            max_per_market=2,
+            max_per_group=2,
         )
         safe_ids = {p["match_id"] for p in safe}
 
-        medium_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
-        medium = _build_ticket_optimized(
-            medium_pool, target_cote=10.0, min_n=4, max_n=6,
-            min_proba=0.55, max_per_market=2, max_per_group=3,
+        # === MEDIUM SHORT : cote ~55, confidence >= 0.55, 5-8 picks ===
+        medium_short_pool = [
+            p for p in all_picks
+            if p["match_id"] not in safe_ids
+            and p.get("confidence", 0) >= 0.55
+        ]
+        medium_short = _build_ticket_optimized(
+            medium_short_pool,
+            target_cote=55.0,
+            min_n=5, max_n=8,
+            min_proba=0.45,
+            max_per_market=2,
+            max_per_group=3,
         )
-        medium_ids = {p["match_id"] for p in medium}
+        medium_short_ids = {p["match_id"] for p in medium_short}
 
+        # === MEDIUM LONG : cote ~125, confidence >= 0.50, 7-10 picks ===
+        medium_long_pool = [
+            p for p in all_picks
+            if p["match_id"] not in safe_ids
+            and p["match_id"] not in medium_short_ids
+            and p.get("confidence", 0) >= 0.50
+        ]
+        medium_long = _build_ticket_optimized(
+            medium_long_pool,
+            target_cote=125.0,
+            min_n=7, max_n=10,
+            min_proba=0.40,
+            max_per_market=3,
+            max_per_group=4,
+        )
+        medium_long_ids = {p["match_id"] for p in medium_long}
+
+        # === RISKY : cote ~1000, confidence >= 0.35, 10-15 picks ===
         risky_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
-            and p["match_id"] not in medium_ids
+            and p["match_id"] not in medium_short_ids
+            and p["match_id"] not in medium_long_ids
+            and p.get("confidence", 0) >= 0.35
         ]
         risky = _build_ticket_optimized(
-            risky_pool, target_cote=40.0, min_n=6, max_n=10,
-            min_proba=0.45, max_per_market=3, max_per_group=4,
+            risky_pool,
+            target_cote=1000.0,
+            min_n=10, max_n=15,
+            min_proba=0.28,
+            max_per_market=4,
+            max_per_group=6,
         )
 
         match_map = {dict(r)["id"]: dict(r) for r in rows}
@@ -1479,14 +1586,16 @@ def get_tickets(day: str):
             return picks
 
         safe = enrich(safe)
-        medium = enrich(medium)
+        medium_short = enrich(medium_short)
+        medium_long = enrich(medium_long)
         risky = enrich(risky)
 
         return {
             "date": day,
-            "safe":   {"name": "Ticket Safe",   **_summarize_ticket(safe)},
-            "medium": {"name": "Ticket Medium", **_summarize_ticket(medium)},
-            "risky":  {"name": "Ticket Risky",  **_summarize_ticket(risky)},
+            "safe":         {"name": "Ticket Safe",         **_summarize_ticket(safe)},
+            "medium_short": {"name": "Ticket Medium Short", **_summarize_ticket(medium_short)},
+            "medium_long":  {"name": "Ticket Medium Long",  **_summarize_ticket(medium_long)},
+            "risky":        {"name": "Ticket Risky",        **_summarize_ticket(risky)},
         }
     except Exception as e:
         print(f"Erreur get_tickets: {e}")
@@ -1494,9 +1603,10 @@ def get_tickets(day: str):
         return {
             "error": f"Erreur interne: {str(e)}",
             "date": day,
-            "safe":   {"name": "Ticket Safe",   "total_cote": 1.0, "count": 0, "picks": []},
-            "medium": {"name": "Ticket Medium", "total_cote": 1.0, "count": 0, "picks": []},
-            "risky":  {"name": "Ticket Risky",  "total_cote": 1.0, "count": 0, "picks": []},
+            "safe":         {"name": "Ticket Safe",         "total_cote": 1.0, "count": 0, "picks": []},
+            "medium_short": {"name": "Ticket Medium Short", "total_cote": 1.0, "count": 0, "picks": []},
+            "medium_long":  {"name": "Ticket Medium Long",  "total_cote": 1.0, "count": 0, "picks": []},
+            "risky":        {"name": "Ticket Risky",        "total_cote": 1.0, "count": 0, "picks": []},
         }
 
 
