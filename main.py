@@ -533,7 +533,7 @@ def generate_analysis(match: dict) -> str:
 # ===== FOOTBALL-CHARTS FETCH =====
 
 async def fetch_footballcharts_fixtures(league_key: str, date_from: str, date_to: str):
-    """Récupère les fixtures via football-charts.com avec saison et logs détaillés."""
+    """Récupère les fixtures via football-charts.com (clé 'matches' dans la réponse)."""
     season = date.today().year
     if date.today().month < 7:
         season -= 1
@@ -549,41 +549,49 @@ async def fetch_footballcharts_fixtures(league_key: str, date_from: str, date_to
                 print(f"Erreur Football-Charts {league_key}: HTTP {r.status_code} - {r.text[:200]}")
                 return []
             data = r.json()
-            fixtures = data if isinstance(data, list) else data.get("fixtures", data.get("data", []))
+            # ✅ CORRECTION : les fixtures sont dans data["matches"]
+            fixtures = []
+            if isinstance(data, dict):
+                fixtures = data.get("matches") or data.get("fixtures") or data.get("data") or []
+            elif isinstance(data, list):
+                fixtures = data
             if not fixtures:
-                print(f"Football-Charts {league_key}: reponse vide (raw: {str(data)[:200]})")
+                note = data.get("note") if isinstance(data, dict) else None
+                print(f"Football-Charts {league_key}: aucun match ({note or 'liste vide'})")
                 return []
             filtered = []
             for f in fixtures:
-                kickoff = (f.get("kickoff_utc") or f.get("kickoff") or
-                           f.get("date") or f.get("datetime"))
+                kickoff = (
+                    f.get("match_date") or f.get("kickoff_utc") or f.get("kickoff")
+                    or f.get("date") or f.get("datetime")
+                )
                 if kickoff and isinstance(kickoff, str):
                     d = kickoff[:10]
                     if date_from <= d <= date_to:
                         filtered.append(f)
-                else:
-                    filtered.append(f)
             print(f"Football-Charts {league_key}: {len(fixtures)} bruts, {len(filtered)} dans la fenetre")
             return filtered
     except Exception as e:
         print(f"Exception Football-Charts {league_key}: {e}")
         return []
 
-
 def convert_footballcharts_to_internal(fixtures: list, league_code: str, league_name: str) -> list:
+    """Convertit le format Football-Charts (home_team/away_team/match_date)."""
     converted = []
     for f in fixtures:
         try:
-            home = (f.get("home") or f.get("home_team") or f.get("homeTeam") or
-                    f.get("home_name") or "?")
-            away = (f.get("away") or f.get("away_team") or f.get("awayTeam") or
-                    f.get("away_name") or "?")
+            # ✅ CORRECTION : clés réelles de l'API = home_team / away_team
+            home = f.get("home_team") or f.get("home") or f.get("homeTeam") or "?"
+            away = f.get("away_team") or f.get("away") or f.get("awayTeam") or "?"
             if isinstance(home, dict):
                 home = home.get("name", "?")
             if isinstance(away, dict):
                 away = away.get("name", "?")
-            kickoff = (f.get("kickoff_utc") or f.get("kickoff") or
-                       f.get("date") or f.get("datetime") or f.get("start_time"))
+            # ✅ CORRECTION : match_date en priorité
+            kickoff = (
+                f.get("match_date") or f.get("kickoff_utc") or f.get("kickoff")
+                or f.get("date") or f.get("datetime") or f.get("start_time")
+            )
             if not kickoff:
                 continue
             if isinstance(kickoff, str) and "T" not in kickoff:
@@ -604,7 +612,6 @@ def convert_footballcharts_to_internal(fixtures: list, league_code: str, league_
         except Exception as e:
             print(f"Erreur conversion Football-Charts {f.get('slug')}: {e}")
     return converted
-
 
 # ===== GOAL API FETCH =====
 
