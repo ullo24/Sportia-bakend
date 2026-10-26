@@ -21,21 +21,18 @@ if not API_KEY:
 APISPORTS_KEY = os.getenv("APISPORTS_KEY")
 APISPORTS_HOST = "v3.football.api-sports.io"
 
-# IDs des compétitions européennes sur API-Football
 API_FOOTBALL_LEAGUES = {
-    "CL": 2,  # Champions League uniquement (EL et UECL passent par football-data.org)
+    "CL": 2,
 }
 
 BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": API_KEY or ""}
 DB_PATH = "/tmp/sportia.db"
 _PIPELINE_RUNNING = False
-# Zafronix
 ZAFRONIX_API_KEY = os.getenv("ZAFRONIX_API_KEY")
 ZAFRONIX_BASE_URL = "https://api.zafronix.com/uefa/europaleague/v1"
 ZAFRONIX_BASE_URL_MLS = "https://api.zafronix.com/usa/mls/v1"
 ZAFRONIX_BASE_URL_UECL = "https://api.zafronix.com/uefa/conferenceleague/v1"
-# Mapping des ligues Zafronix (pour eviter "Unknown" a l'insertion)
 ZAFRONIX_LEAGUES = {
     "EL": "Europa League",
     "MLS": "Major League Soccer",
@@ -64,6 +61,28 @@ LEAGUE_TOP_N = {
 
 _STANDINGS_CACHE = {}
 MIGRATE_DB = False
+
+
+# ===== APP SETUP (doit etre defini AVANT les routes) =====
+
+scheduler = AsyncIOScheduler()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    scheduler.add_job(daily_pipeline, "cron", hour=6, minute=0)
+    scheduler.add_job(daily_pipeline, "cron", hour=12, minute=0)
+    scheduler.start()
+    asyncio.create_task(daily_pipeline())
+    yield
+    scheduler.shutdown()
+
+
+app = FastAPI(title="SportIA Predict", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+)
 
 
 # ===== BASE DE DONNEES =====
@@ -222,121 +241,6 @@ def _form_factor(form_str):
     if t == 0: return 1.0
     r = (w * 3 + d) / (t * 3) if t * 3 > 0 else 0.5
     return 0.90 + (r * 0.20)
-
-
-def calc_expected_goals(league_code: str):
-    base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
-    home_xg = (base / 2.0) * HOME_ADVANTAGE
-    away_xg = base / 2.0
-    return max(0.3, round(home_xg, 2)), max(0.3, round(away_xg, 2))
-
-
-def calc_expected_goals_v2(league_code: str, home_team: str, away_team: str):
-    """Calcule les xG avec classement + stats + garde-fous (ancienne version)."""
-    base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
-    conn = db()
-    league_name = COMPETITIONS.get(league_code, "")
-    allow_any_league = league_code in ["CL", "EL", "UECL", "EC", "WC"]
-    prefixes = ["FC ", "AC ", "SC ", "AS ", "SS ", "SSC ", "CF ", "RC ",
-                "1. ", "SV ", "TSG ", "VfB ", "VfL ", "FK ", "SK ",
-                "CD ", "GD ", "CA ", "Real ", "Sporting ", "Club ",
-                "Atletico ", "Atlético ", "Olympique ", "Stade "]
-
-    def _clean_name(n):
-        cleaned = n
-        for p in prefixes:
-            cleaned = cleaned.replace(p, "")
-        return cleaned.strip().lower()
-
-    def _find_team_stats(team_name):
-        row = conn.execute(
-            "SELECT * FROM team_stats WHERE team=? AND league=?",
-            (team_name, league_name),
-        ).fetchone()
-        if row: return row
-        if allow_any_league:
-            row = conn.execute(
-                "SELECT * FROM team_stats WHERE team=? LIMIT 1",
-                (team_name,),
-            ).fetchone()
-            if row: return row
-        cleaned = _clean_name(team_name)
-        all_teams = conn.execute(
-            "SELECT * FROM team_stats WHERE league=?", (league_name,)
-        ).fetchall()
-        for team_row in all_teams:
-            if cleaned in _clean_name(team_row["team"]) or _clean_name(team_row["team"]) in cleaned:
-                return team_row
-        if allow_any_league:
-            all_teams = conn.execute("SELECT * FROM team_stats").fetchall()
-            for team_row in all_teams:
-                if cleaned in _clean_name(team_row["team"]) or _clean_name(team_row["team"]) in cleaned:
-                    return team_row
-        return None
-
-    home_stats = _find_team_stats(home_team)
-    away_stats = _find_team_stats(away_team)
-    conn.close()
-
-    home_ok = home_stats and home_stats["matches_played"] >= 3
-    away_ok = away_stats and away_stats["matches_played"] >= 3
-    if not home_ok or not away_ok:
-        home_xg = (base / 2.0) * HOME_ADVANTAGE
-        away_xg = base / 2.0
-        return max(0.5, round(home_xg, 2)), max(0.5, round(away_xg, 2))
-
-    home_mp = max(home_stats["matches_played"], 1)
-    away_mp = max(away_stats["matches_played"], 1)
-    home_ppm = home_stats["points"] / home_mp
-    away_ppm = away_stats["points"] / away_mp
-    if home_ppm + away_ppm < 0.5:
-        home_xg = (base / 2.0) * HOME_ADVANTAGE
-        away_xg = base / 2.0
-        return max(0.5, round(home_xg, 2)), max(0.5, round(away_xg, 2))
-
-    home_ppm = max(home_ppm, away_ppm * 0.33)
-    away_ppm = max(away_ppm, home_ppm * 0.33)
-    total_ppm = home_ppm + away_ppm
-    home_ratio = home_ppm / total_ppm
-    away_ratio = 1.0 - home_ratio
-    home_xg = base * home_ratio * HOME_ADVANTAGE
-    away_xg = base * away_ratio / HOME_ADVANTAGE
-
-    home_attack = home_stats["goals_for"] / home_mp
-    home_defense = home_stats["goals_against"] / home_mp
-    away_attack = away_stats["goals_for"] / away_mp
-    away_defense = away_stats["goals_against"] / away_mp
-    league_avg = base / 2.0
-    home_attack_ratio = home_attack / league_avg if league_avg > 0 else 1.0
-    away_attack_ratio = away_attack / league_avg if league_avg > 0 else 1.0
-    home_defense_ratio = home_defense / league_avg if league_avg > 0 else 1.0
-    away_defense_ratio = away_defense / league_avg if league_avg > 0 else 1.0
-    home_attack_factor = (home_attack_ratio + 0.5) / (away_defense_ratio + 0.5)
-    away_attack_factor = (away_attack_ratio + 0.5) / (home_defense_ratio + 0.5)
-    home_xg *= (0.75 + 0.25 * home_attack_factor)
-    away_xg *= (0.75 + 0.25 * away_attack_factor)
-
-    def form_factor(form_str):
-        if not form_str: return 1.0
-        wins = form_str.upper().count("W")
-        draws = form_str.upper().count("D")
-        total = len(form_str)
-        if total == 0: return 1.0
-        points = wins * 3 + draws
-        max_points = total * 3
-        ratio = points / max_points if max_points > 0 else 0.5
-        return 0.90 + (ratio * 0.20)
-
-    home_xg *= form_factor(home_stats["form"] or "")
-    away_xg *= form_factor(away_stats["form"] or "")
-    home_xg = max(0.6, min(3.0, round(home_xg, 2)))
-    away_xg = max(0.6, min(3.0, round(away_xg, 2)))
-    total = home_xg + away_xg
-    if total > 4.5:
-        ratio = 4.5 / total
-        home_xg = round(home_xg * ratio, 2)
-        away_xg = round(away_xg * ratio, 2)
-    return home_xg, away_xg
 
 
 def calc_expected_goals_v2e(league_code: str, home_team: str, away_team: str):
@@ -604,31 +508,6 @@ async def fetch_apisports_matches(league_id: int, season: int, date_from: str, d
         return []
 
 
-THESPORTSDB_BASE = "https://www.thesportsdb.com/api/v1/json/3"
-
-
-async def fetch_thesportsdb_europa_league(season: str, date_from: str, date_to: str):
-    url = f"{THESPORTSDB_BASE}/eventsseason.php"
-    params = {"id": 4481, "s": season}
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(url, params=params)
-            if r.status_code != 200:
-                print(f"Erreur TheSportsDB EL : {r.status_code}")
-                return []
-            data = r.json()
-            events = data.get("events") or []
-            filtered = []
-            for ev in events:
-                ev_date = ev.get("dateEvent")
-                if ev_date and date_from <= ev_date <= date_to:
-                    filtered.append(ev)
-            return filtered
-    except Exception as e:
-        print(f"Exception TheSportsDB EL : {e}")
-        return []
-
-
 async def fetch_zafronix_europa_league(season: int, date_from: str, date_to: str):
     if not ZAFRONIX_API_KEY:
         print("ZAFRONIX_API_KEY non definie")
@@ -708,6 +587,114 @@ async def fetch_zafronix_mls(season: int, date_from: str, date_to: str):
     except Exception as e:
         print(f"Exception Zafronix MLS : {e}")
         return []
+
+
+def convert_apisports_to_internal(api_matches: list, league_code: str, league_name: str) -> list:
+    converted = []
+    for match in api_matches:
+        try:
+            fixture = match.get("fixture", {})
+            teams = match.get("teams", {})
+            status_short = fixture.get("status", {}).get("short", "NS")
+            if status_short not in ["NS", "TBD", "1H", "HT", "2H", "ET", "BT", "P"]:
+                continue
+            internal_match = {
+                "id": fixture.get("id"),
+                "homeTeam": {
+                    "name": teams.get("home", {}).get("name"),
+                    "crest": teams.get("home", {}).get("logo"),
+                },
+                "awayTeam": {
+                    "name": teams.get("away", {}).get("name"),
+                    "crest": teams.get("away", {}).get("logo"),
+                },
+                "utcDate": fixture.get("date"),
+                "status": "SCHEDULED" if status_short in ["NS", "TBD"] else "IN_PLAY",
+                "score": {"fullTime": {"home": None, "away": None}},
+                "league": {"name": league_name, "country": "Europe"},
+                "_code": league_code,
+            }
+            converted.append(internal_match)
+        except Exception as e:
+            print(f"Erreur conversion match {match.get('fixture', {}).get('id')}: {e}")
+    return converted
+
+
+def convert_zafronix_to_internal(events: list, league_code: str, league_name: str) -> list:
+    converted = []
+    for ev in events:
+        try:
+            raw_id = ev.get("id", 0)
+            if isinstance(raw_id, str):
+                import re
+                digits = re.findall(r"\d+", raw_id)
+                numeric = int(digits[-1]) if digits else 0
+            else:
+                numeric = int(raw_id) if raw_id else 0
+            match_id = 1_000_000_000 + numeric
+
+            status_raw = (ev.get("status") or "").upper()
+            if isinstance(status_raw, dict):
+                status_raw = (status_raw.get("short") or "").upper()
+            if status_raw in ["FINISHED", "FT", "AET", "PEN"]:
+                status = "FINISHED"
+            elif status_raw in ["LIVE", "IN_PLAY", "1H", "2H", "HT"]:
+                status = "IN_PLAY"
+            else:
+                status = "SCHEDULED"
+
+            home_team = ev.get("homeTeam") or ev.get("home") or {}
+            away_team = ev.get("awayTeam") or ev.get("away") or {}
+
+            if isinstance(home_team, str):
+                home_name = home_team
+                home_crest = None
+            else:
+                home_name = home_team.get("name") or home_team.get("shortName") or "?"
+                home_crest = home_team.get("crest") or home_team.get("logo")
+
+            if isinstance(away_team, str):
+                away_name = away_team
+                away_crest = None
+            else:
+                away_name = away_team.get("name") or away_team.get("shortName") or "?"
+                away_crest = away_team.get("crest") or away_team.get("logo")
+
+            score = ev.get("score") or {}
+            if isinstance(score, dict):
+                full_time = score.get("fullTime") or score
+                home_goals = full_time.get("home")
+                away_goals = full_time.get("away")
+            else:
+                home_goals = None
+                away_goals = None
+
+            kickoff = ev.get("utcDate") or ev.get("date") or ev.get("dateEvent")
+            time_str = (
+                ev.get("time")
+                or ev.get("strTime")
+                or ev.get("startTime")
+                or ev.get("kickoffTime")
+                or ev.get("eventTime")
+            )
+            if kickoff and "T" not in kickoff and time_str:
+                kickoff = f"{kickoff}T{time_str}"
+            if kickoff and "T" not in kickoff:
+                kickoff = f"{kickoff}T00:00:00"
+            internal_match = {
+                "id": match_id,
+                "homeTeam": {"name": home_name, "crest": home_crest},
+                "awayTeam": {"name": away_name, "crest": away_crest},
+                "utcDate": kickoff,
+                "status": status,
+                "score": {"fullTime": {"home": home_goals, "away": away_goals}},
+                "league": {"name": league_name, "country": "International"},
+                "_code": league_code,
+            }
+            converted.append(internal_match)
+        except Exception as e:
+            print(f"Erreur conversion Zafronix {ev.get('id')}: {e}")
+    return converted
 
 
 async def daily_pipeline():
@@ -900,163 +887,6 @@ def mark_free_access():
     print("Top " + str(FREE_MATCHES_PER_DAY) + " matchs marques comme gratuits")
 
 
-# ===== TICKETS =====
-
-def _calc_total_cote(picks):
-    c = 1.0
-    for p in picks:
-        c *= p["cote"]
-    return round(c, 2)
-
-
-def convert_apisports_to_internal(api_matches: list, league_code: str, league_name: str) -> list:
-    converted = []
-    for match in api_matches:
-        try:
-            fixture = match.get("fixture", {})
-            teams = match.get("teams", {})
-            status_short = fixture.get("status", {}).get("short", "NS")
-            if status_short not in ["NS", "TBD", "1H", "HT", "2H", "ET", "BT", "P"]:
-                continue
-            internal_match = {
-                "id": fixture.get("id"),
-                "homeTeam": {
-                    "name": teams.get("home", {}).get("name"),
-                    "crest": teams.get("home", {}).get("logo"),
-                },
-                "awayTeam": {
-                    "name": teams.get("away", {}).get("name"),
-                    "crest": teams.get("away", {}).get("logo"),
-                },
-                "utcDate": fixture.get("date"),
-                "status": "SCHEDULED" if status_short in ["NS", "TBD"] else "IN_PLAY",
-                "score": {"fullTime": {"home": None, "away": None}},
-                "league": {"name": league_name, "country": "Europe"},
-                "_code": league_code,
-            }
-            converted.append(internal_match)
-        except Exception as e:
-            print(f"Erreur conversion match {match.get('fixture', {}).get('id')}: {e}")
-    return converted
-
-
-def convert_zafronix_to_internal(events: list, league_code: str, league_name: str) -> list:
-    converted = []
-    for ev in events:
-        try:
-            raw_id = ev.get("id", 0)
-            if isinstance(raw_id, str):
-                import re
-                digits = re.findall(r"\d+", raw_id)
-                numeric = int(digits[-1]) if digits else 0
-            else:
-                numeric = int(raw_id) if raw_id else 0
-            match_id = 1_000_000_000 + numeric
-
-            status_raw = (ev.get("status") or "").upper()
-            if isinstance(status_raw, dict):
-                status_raw = (status_raw.get("short") or "").upper()
-            if status_raw in ["FINISHED", "FT", "AET", "PEN"]:
-                status = "FINISHED"
-            elif status_raw in ["LIVE", "IN_PLAY", "1H", "2H", "HT"]:
-                status = "IN_PLAY"
-            else:
-                status = "SCHEDULED"
-
-            home_team = ev.get("homeTeam") or ev.get("home") or {}
-            away_team = ev.get("awayTeam") or ev.get("away") or {}
-
-            if isinstance(home_team, str):
-                home_name = home_team
-                home_crest = None
-            else:
-                home_name = home_team.get("name") or home_team.get("shortName") or "?"
-                home_crest = home_team.get("crest") or home_team.get("logo")
-
-            if isinstance(away_team, str):
-                away_name = away_team
-                away_crest = None
-            else:
-                away_name = away_team.get("name") or away_team.get("shortName") or "?"
-                away_crest = away_team.get("crest") or away_team.get("logo")
-
-            score = ev.get("score") or {}
-            if isinstance(score, dict):
-                full_time = score.get("fullTime") or score
-                home_goals = full_time.get("home")
-                away_goals = full_time.get("away")
-            else:
-                home_goals = None
-                away_goals = None
-
-            kickoff = ev.get("utcDate") or ev.get("date") or ev.get("dateEvent")
-            time_str = (
-                ev.get("time")
-                or ev.get("strTime")
-                or ev.get("startTime")
-                or ev.get("kickoffTime")
-                or ev.get("eventTime")
-            )
-            if kickoff and "T" not in kickoff and time_str:
-                kickoff = f"{kickoff}T{time_str}"
-            if kickoff and "T" not in kickoff:
-                kickoff = f"{kickoff}T00:00:00"
-            internal_match = {
-                "id": match_id,
-                "homeTeam": {"name": home_name, "crest": home_crest},
-                "awayTeam": {"name": away_name, "crest": away_crest},
-                "utcDate": kickoff,
-                "status": status,
-                "score": {"fullTime": {"home": home_goals, "away": away_goals}},
-                "league": {"name": league_name, "country": "International"},
-                "_code": league_code,
-            }
-            converted.append(internal_match)
-        except Exception as e:
-            print(f"Erreur conversion Zafronix {ev.get('id')}: {e}")
-    return converted
-
-
-def convert_thesportsdb_to_internal(events: list, league_code: str, league_name: str) -> list:
-    converted = []
-    for ev in events:
-        try:
-            status_str = (ev.get("strStatus") or "").upper()
-            if status_str in ["FT", "AET", "PEN", "FINISHED"]:
-                status = "FINISHED"
-            elif status_str in ["1H", "2H", "HT", "LIVE"]:
-                status = "IN_PLAY"
-            else:
-                status = "SCHEDULED"
-
-            home_team = ev.get("strHomeTeam") or "?"
-            away_team = ev.get("strAwayTeam") or "?"
-            home_score = ev.get("intHomeScore")
-            away_score = ev.get("intAwayScore")
-
-            date_str = ev.get("dateEvent")
-            time_str = ev.get("strTime") or "00:00:00"
-            kickoff = f"{date_str}T{time_str}Z" if date_str else None
-
-            internal_match = {
-                "id": int(ev.get("idEvent", 0)),
-                "homeTeam": {"name": home_team, "crest": ev.get("strHomeTeamBadge")},
-                "awayTeam": {"name": away_team, "crest": ev.get("strAwayTeamBadge")},
-                "utcDate": kickoff,
-                "status": status,
-                "score": {
-                    "fullTime": {"home": int(home_score) if home_score else None,
-                                 "away": int(away_score) if away_score else None}
-                },
-                "league": {"name": league_name, "country": "Europe"},
-                "_code": league_code,
-            }
-            converted.append(internal_match)
-        except Exception as e:
-            print(f"Erreur conversion TheSportsDB {ev.get('idEvent')}: {e}")
-    return converted
-
-
 async def fetch_top_teams(code: str, top_n: int):
     cached = _STANDINGS_CACHE.get(code)
     if cached:
@@ -1160,6 +990,8 @@ async def fetch_team_stats(code: str, league_name: str):
         print(f"Exception standings {code} : {e}")
 
 
+# ===== EVALUATION DES PICKS =====
+
 def _evaluate_pick(pick, match):
     market = pick.get("market", "")
     status = match.get("status", "")
@@ -1170,14 +1002,11 @@ def _evaluate_pick(pick, match):
 
     if status in ["SCHEDULED", "TIMED"]:
         return {"result": "pending", "reason": "Match pas encore commence", "current_score": None}
-
     if status in ["IN_PLAY", "PAUSED"]:
         score_txt = str(hg) + "-" + str(ag) if hg is not None and ag is not None else "0-0"
         return {"result": "pending", "reason": "En cours " + score_txt, "current_score": score_txt}
-
     if status != "FINISHED":
         return {"result": "pending", "reason": "Statut inconnu", "current_score": None}
-
     if hg is None or ag is None:
         return {"result": "pending", "reason": "Score indisponible", "current_score": None}
 
@@ -1277,7 +1106,8 @@ def _evaluate_pick(pick, match):
     }
 
 
-# Groupes de corrélation (pour éviter les picks qui prédisent la même chose)
+# ===== TICKETS HELPERS =====
+
 _MARKET_GROUP = {
     "1": "home", "DNB D": "home", "H-1 D": "home", "H+1 D": "home",
     "Dom. marque": "home",
@@ -1292,8 +1122,14 @@ _MARKET_GROUP = {
 }
 
 
+def _calc_total_cote(picks):
+    c = 1.0
+    for p in picks:
+        c *= p["cote"]
+    return round(c, 2)
+
+
 def _all_picks_for_match(m):
-    """Un pick par marché, filtres élargis (0.30–0.95 proba, 1.05–3.33 cote)."""
     markets = [
         ("1", m.get("home_win"), m["home"]),
         ("X", m.get("draw"), "Match nul"),
@@ -1305,21 +1141,21 @@ def _all_picks_for_match(m):
         ("-2.5", m.get("under_25"), "-2.5 buts"),
         ("-3.5", m.get("under_35"), "-3.5 buts"),
         ("-4.5", m.get("under_45"), "-4.5 buts"),
-        ("BTTS", m.get("btts_yes"), "Les 2 équipes marquent"),
-        ("1MT", m.get("first_half_goal"), "But en 1ère MT"),
+        ("BTTS", m.get("btts_yes"), "Les 2 equipes marquent"),
+        ("1MT", m.get("first_half_goal"), "But en 1ere MT"),
         ("1X", m.get("dc_1x"), "Double Chance 1X"),
         ("12", m.get("dc_12"), "Double Chance 12"),
         ("X2", m.get("dc_x2"), "Double Chance X2"),
         ("DNB D", m.get("dnb_home"), "Draw No Bet Domicile"),
-        ("DNB E", m.get("dnb_away"), "Draw No Bet Extérieur"),
+        ("DNB E", m.get("dnb_away"), "Draw No Bet Exterieur"),
         ("BTTS+2.5", m.get("btts_over_25"), "BTTS & Over 2.5"),
         ("BTTS-3.5", m.get("btts_under_35"), "BTTS & Under 3.5"),
         ("H-1 D", m.get("handicap_home_minus1"), "Handicap -1 Domicile"),
-        ("H-1 E", m.get("handicap_away_minus1"), "Handicap -1 Extérieur"),
+        ("H-1 E", m.get("handicap_away_minus1"), "Handicap -1 Exterieur"),
         ("H+1 D", m.get("handicap_home_plus1"), "Handicap +1 Domicile"),
-        ("H+1 E", m.get("handicap_away_plus1"), "Handicap +1 Extérieur"),
+        ("H+1 E", m.get("handicap_away_plus1"), "Handicap +1 Exterieur"),
         ("Dom. marque", m.get("home_scores"), "Domicile marque"),
-        ("Ext. marque", m.get("away_scores"), "Extérieur marque"),
+        ("Ext. marque", m.get("away_scores"), "Exterieur marque"),
     ]
     picks = []
     for label, prob, desc in markets:
@@ -1413,9 +1249,167 @@ def _summarize_ticket(picks):
     }
 
 
+def _calc_risky_pick(m):
+    hw = m.get("home_win") or 0
+    d = m.get("draw") or 0
+    aw = m.get("away_win") or 0
+    over_25 = m.get("over_25") or 0
+    over_35 = m.get("over_35") or 0
+    under_25 = m.get("under_25") or 0
+    btts = m.get("btts_yes") or 0
+    fh_goal = m.get("first_half_goal") or 0
+    fh_over_15 = m.get("first_half_over_15") or 0
+    hcp2_home = m.get("handicap_home_minus2") or 0
+    hcp2_away = m.get("handicap_away_minus2") or 0
+    home_xg = m.get("home_xg") or 0
+    away_xg = m.get("away_xg") or 0
+    total_xg = m.get("total_xg") or 0
+
+    candidates = []
+    if hw >= 0.75:
+        candidates.append(("1", m["home"], hw, 1.0 / hw))
+    if aw >= 0.75:
+        candidates.append(("2", m["away"], aw, 1.0 / aw))
+    if home_xg < 1.3 and away_xg < 1.3 and hw < 0.40 and aw < 0.40 and d >= 0.28:
+        candidates.append(("X", "Match nul", d, 1.0 / d))
+    if hw > 0.70 and home_xg > 1.9 and away_xg < 1.0 and hcp2_home > 0.28:
+        candidates.append(("H-2 D", "Handicap -2 " + m["home"], hcp2_home, 1.0 / hcp2_home))
+    if aw > 0.70 and away_xg > 1.9 and home_xg < 1.0 and hcp2_away > 0.28:
+        candidates.append(("H-2 E", "Handicap -2 " + m["away"], hcp2_away, 1.0 / hcp2_away))
+    if 0.62 <= over_25 <= 0.72:
+        candidates.append(("+2.5", "+2.5 buts", over_25, 1.0 / over_25))
+    if 0.55 <= btts <= 0.77:
+        candidates.append(("BTTS", "Les 2 equipes marquent", btts, 1.0 / btts))
+    if total_xg > 3.8 and over_35 > 0.50:
+        candidates.append(("+3.5", "+3.5 buts", over_35, 1.0 / over_35))
+    if fh_goal >= 0.65:
+        candidates.append(("1MT", "But en 1ere MT", fh_goal, 1.0 / fh_goal))
+    if total_xg > 3.8 and fh_over_15 >= 0.45:
+        candidates.append(("+1.5 1MT", "+1.5 buts 1ere MT", fh_over_15, 1.0 / fh_over_15))
+    if total_xg < 2.3 and under_25 > 0.55:
+        candidates.append(("-2.5", "-2.5 buts", under_25, 1.0 / under_25))
+
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda x: abs(x[3] - 2.0))
+    return {
+        "match_id": m["id"], "home": m["home"], "away": m["away"],
+        "league": m["league"], "kickoff": m["kickoff"],
+        "home_logo": m["home_logo"], "away_logo": m["away_logo"],
+        "market": best[0], "description": best[1],
+        "proba": round(best[2], 3), "cote": round(best[3], 2),
+    }
+
+
+# ===== ROUTES =====
+
+@app.get("/")
+def root():
+    return {"status": "ok", "app": "SportIA Predict", "version": "3.0"}
+
+
+@app.api_route("/health", methods=["GET", "HEAD"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/quota")
+def quota():
+    used = get_today_count()
+    return {"used": used, "remaining_today": max(0, 95 - used)}
+
+
+@app.get("/matches/{day}")
+def get_matches(day: str):
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)
+    ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        m = dict(r)
+        m["analysis"] = generate_analysis(m)
+        result.append(m)
+    return result
+
+
+@app.get("/matches-week")
+def matches_week():
+    today = date.today()
+    week_later = (today + timedelta(days=DAYS_AHEAD)).isoformat()
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM matches WHERE date(kickoff) BETWEEN ? AND ? ORDER BY kickoff ASC",
+        (today.isoformat(), week_later),
+    ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        m = dict(r)
+        m["analysis"] = generate_analysis(m)
+        result.append(m)
+    return result
+
+
+@app.get("/predictions/{day}/free")
+def get_free_predictions(day: str):
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM matches WHERE date(kickoff)=? AND free_access=1 ORDER BY confidence DESC",
+        (day,),
+    ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        m = dict(r)
+        m["analysis"] = generate_analysis(m)
+        result.append(m)
+    return result
+
+
+@app.get("/predictions/{day}/premium")
+def get_premium_predictions(day: str):
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY confidence DESC", (day,)
+    ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        m = dict(r)
+        m["analysis"] = generate_analysis(m)
+        result.append(m)
+    return result
+
+
+@app.get("/matches/{match_id}/detail")
+def match_detail(match_id: int):
+    conn = db()
+    row = conn.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Match introuvable")
+    m = dict(row)
+    if m.get("exact_scores"):
+        try:
+            m["exact_scores"] = json.loads(m["exact_scores"])
+        except Exception:
+            m["exact_scores"] = []
+    m["analysis"] = generate_analysis(m)
+    return m
+
+
+@app.get("/leagues")
+def get_leagues():
+    conn = db()
+    rows = conn.execute("SELECT DISTINCT league FROM matches").fetchall()
+    conn.close()
+    return [r["league"] for r in rows]
+
+
 @app.get("/tickets/{day}")
 def get_tickets(day: str):
-    """Génère 3 tickets (Safe / Medium / Risky) optimisés."""
     try:
         conn = db()
         rows = conn.execute(
@@ -1439,23 +1433,15 @@ def get_tickets(day: str):
             return {"error": "Aucun pick disponible", "date": day}
 
         safe = _build_ticket_optimized(
-            all_picks,
-            target_cote=2.0,
-            min_n=2, max_n=3,
-            min_proba=0.65,
-            max_per_market=2,
-            max_per_group=2,
+            all_picks, target_cote=2.0, min_n=2, max_n=3,
+            min_proba=0.65, max_per_market=2, max_per_group=2,
         )
         safe_ids = {p["match_id"] for p in safe}
 
         medium_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
         medium = _build_ticket_optimized(
-            medium_pool,
-            target_cote=10.0,
-            min_n=4, max_n=6,
-            min_proba=0.55,
-            max_per_market=2,
-            max_per_group=3,
+            medium_pool, target_cote=10.0, min_n=4, max_n=6,
+            min_proba=0.55, max_per_market=2, max_per_group=3,
         )
         medium_ids = {p["match_id"] for p in medium}
 
@@ -1465,12 +1451,8 @@ def get_tickets(day: str):
             and p["match_id"] not in medium_ids
         ]
         risky = _build_ticket_optimized(
-            risky_pool,
-            target_cote=40.0,
-            min_n=6, max_n=10,
-            min_proba=0.45,
-            max_per_market=3,
-            max_per_group=4,
+            risky_pool, target_cote=40.0, min_n=6, max_n=10,
+            min_proba=0.45, max_per_market=3, max_per_group=4,
         )
 
         match_map = {dict(r)["id"]: dict(r) for r in rows}
@@ -1506,7 +1488,6 @@ def get_tickets(day: str):
             "medium": {"name": "Ticket Medium", **_summarize_ticket(medium)},
             "risky":  {"name": "Ticket Risky",  **_summarize_ticket(risky)},
         }
-
     except Exception as e:
         print(f"Erreur get_tickets: {e}")
         import traceback; traceback.print_exc()
@@ -1517,74 +1498,6 @@ def get_tickets(day: str):
             "medium": {"name": "Ticket Medium", "total_cote": 1.0, "count": 0, "picks": []},
             "risky":  {"name": "Ticket Risky",  "total_cote": 1.0, "count": 0, "picks": []},
         }
-
-
-# ===== PREDICTIONS JUSTES =====
-
-def _check_won_markets(m):
-    if m.get("status") != "FINISHED":
-        return []
-    hg = m.get("home_goals")
-    ag = m.get("away_goals")
-    if hg is None or ag is None:
-        return []
-    total = hg + ag
-    won = []
-
-    def add(label, desc, prob):
-        if prob is None or prob < 0.55:
-            return
-        won.append({
-            "market": label, "description": desc,
-            "proba": round(prob, 3),
-            "cote": round(1.0 / prob, 2) if prob > 0 else None,
-        })
-
-    if hg > ag:
-        add("1", m["home"], m.get("home_win", 0))
-    elif hg == ag:
-        add("X", "Match nul", m.get("draw", 0))
-    else:
-        add("2", m["away"], m.get("away_win", 0))
-    if total > 0.5:
-        add("+0.5", "Over 0.5 but", m.get("over_05", 0))
-    if total > 1.5:
-        add("+1.5", "+1.5 buts", m.get("over_15", 0))
-    if total > 2.5:
-        add("+2.5", "+2.5 buts", m.get("over_25", 0))
-    if total < 3.5:
-        add("-3.5", "-3.5 buts", m.get("under_35", 0))
-    if total < 4.5:
-        add("-4.5", "-4.5 buts", m.get("under_45", 0))
-    if hg > 0 and ag > 0:
-        add("BTTS", "Les 2 marquent", m.get("btts_yes", 0))
-        if total > 2.5:
-            add("BTTS+2.5", "BTTS & Over 2.5", m.get("btts_over_25", 0))
-        if total < 3.5:
-            add("BTTS-3.5", "BTTS & Under 3.5", m.get("btts_under_35", 0))
-    if hg >= ag:
-        add("1X", "Double Chance 1X", m.get("dc_1x", 0))
-    if hg != ag:
-        add("12", "Double Chance 12", m.get("dc_12", 0))
-    if hg <= ag:
-        add("X2", "Double Chance X2", m.get("dc_x2", 0))
-    if hg > ag:
-        add("DNB D", "Draw No Bet Domicile", m.get("dnb_home", 0))
-    elif hg < ag:
-        add("DNB E", "Draw No Bet Exterieur", m.get("dnb_away", 0))
-    if hg - ag >= 2:
-        add("H-1 D", "Handicap -1 Domicile", m.get("handicap_home_minus1", 0))
-    if ag - hg >= 2:
-        add("H-1 E", "Handicap -1 Exterieur", m.get("handicap_away_minus1", 0))
-    if hg - ag >= -1:
-        add("H+1 D", "Handicap +1 Domicile", m.get("handicap_home_plus1", 0))
-    if ag - hg >= -1:
-        add("H+1 E", "Handicap +1 Exterieur", m.get("handicap_away_plus1", 0))
-    if hg > 0:
-        add("Dom. marque", "Domicile marque", m.get("home_scores", 0))
-    if ag > 0:
-        add("Ext. marque", "Exterieur marque", m.get("away_scores", 0))
-    return won
 
 
 @app.get("/predictions/won/{day}")
@@ -1647,8 +1560,6 @@ def get_won_predictions_week():
     }
 
 
-# ===== SCORES EN DIRECT =====
-
 @app.get("/live-scores/{day}")
 async def get_live_scores(day: str, refresh: bool = False):
     all_results = []
@@ -1680,67 +1591,8 @@ async def get_live_scores(day: str, refresh: bool = False):
     return all_results
 
 
-# ===== TICKETS SEMAINE =====
-
-def _calc_risky_pick(m):
-    """Choisit le pick risky selon criteres metier, cible ~1.80-2.20."""
-    hw = m.get("home_win") or 0
-    d = m.get("draw") or 0
-    aw = m.get("away_win") or 0
-    over_25 = m.get("over_25") or 0
-    over_35 = m.get("over_35") or 0
-    under_25 = m.get("under_25") or 0
-    btts = m.get("btts_yes") or 0
-    fh_goal = m.get("first_half_goal") or 0
-    fh_over_15 = m.get("first_half_over_15") or 0
-    hcp2_home = m.get("handicap_home_minus2") or 0
-    hcp2_away = m.get("handicap_away_minus2") or 0
-    home_xg = m.get("home_xg") or 0
-    away_xg = m.get("away_xg") or 0
-    total_xg = m.get("total_xg") or 0
-
-    candidates = []
-
-    if hw >= 0.75:
-        candidates.append(("1", m["home"], hw, 1.0 / hw))
-    if aw >= 0.75:
-        candidates.append(("2", m["away"], aw, 1.0 / aw))
-    if home_xg < 1.3 and away_xg < 1.3 and hw < 0.40 and aw < 0.40 and d >= 0.28:
-        candidates.append(("X", "Match nul", d, 1.0 / d))
-    if hw > 0.70 and home_xg > 1.9 and away_xg < 1.0 and hcp2_home > 0.28:
-        candidates.append(("H-2 D", "Handicap -2 " + m["home"], hcp2_home, 1.0 / hcp2_home))
-    if aw > 0.70 and away_xg > 1.9 and home_xg < 1.0 and hcp2_away > 0.28:
-        candidates.append(("H-2 E", "Handicap -2 " + m["away"], hcp2_away, 1.0 / hcp2_away))
-    if 0.62 <= over_25 <= 0.72:
-        candidates.append(("+2.5", "+2.5 buts", over_25, 1.0 / over_25))
-    if 0.55 <= btts <= 0.77:
-        candidates.append(("BTTS", "Les 2 equipes marquent", btts, 1.0 / btts))
-    if total_xg > 3.8 and over_35 > 0.50:
-        candidates.append(("+3.5", "+3.5 buts", over_35, 1.0 / over_35))
-    if fh_goal >= 0.65:
-        candidates.append(("1MT", "But en 1ere MT", fh_goal, 1.0 / fh_goal))
-    if total_xg > 3.8 and fh_over_15 >= 0.45:
-        candidates.append(("+1.5 1MT", "+1.5 buts 1ere MT", fh_over_15, 1.0 / fh_over_15))
-    if total_xg < 2.3 and under_25 > 0.55:
-        candidates.append(("-2.5", "-2.5 buts", under_25, 1.0 / under_25))
-
-    if not candidates:
-        return None
-
-    best = min(candidates, key=lambda x: abs(x[3] - 2.0))
-
-    return {
-        "match_id": m["id"], "home": m["home"], "away": m["away"],
-        "league": m["league"], "kickoff": m["kickoff"],
-        "home_logo": m["home_logo"], "away_logo": m["away_logo"],
-        "market": best[0], "description": best[1],
-        "proba": round(best[2], 3), "cote": round(best[3], 2),
-    }
-
-
 @app.get("/tickets-week")
 async def get_tickets_week():
-    """Ticket semaine : 1 pick par match eligible (top equipes)."""
     today = date.today()
     week_later = (today + timedelta(days=7)).isoformat()
 
@@ -1796,7 +1648,6 @@ async def get_tickets_week():
 
     for m in eligible:
         pick = None
-
         try:
             risky_pick = _calc_risky_pick(m)
             if risky_pick and risky_pick["cote"] <= 1.85:
@@ -1911,133 +1762,6 @@ async def get_tickets_week():
         "markets_used": dict(market_count),
         "top_teams": {code: list(teams) for code, teams in top_teams_by_league.items()},
     }
-
-
-# ===== APP =====
-
-scheduler = AsyncIOScheduler()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
-    scheduler.add_job(daily_pipeline, "cron", hour=6, minute=0)
-    scheduler.add_job(daily_pipeline, "cron", hour=12, minute=0)
-    scheduler.start()
-    asyncio.create_task(daily_pipeline())
-    yield
-    scheduler.shutdown()
-
-
-app = FastAPI(title="SportIA Predict", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
-
-
-@app.get("/")
-def root():
-    return {"status": "ok", "app": "SportIA Predict", "version": "3.0"}
-
-
-@app.api_route("/health", methods=["GET", "HEAD"])
-def health_check():
-    return {"status": "ok"}
-
-
-@app.get("/quota")
-def quota():
-    used = get_today_count()
-    return {"used": used, "remaining_today": max(0, 95 - used)}
-
-
-@app.get("/matches/{day}")
-def get_matches(day: str):
-    conn = db()
-    rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)
-    ).fetchall()
-    conn.close()
-    result = []
-    for r in rows:
-        m = dict(r)
-        m["analysis"] = generate_analysis(m)
-        result.append(m)
-    return result
-
-
-@app.get("/matches-week")
-def matches_week():
-    today = date.today()
-    week_later = (today + timedelta(days=DAYS_AHEAD)).isoformat()
-    conn = db()
-    rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff) BETWEEN ? AND ? ORDER BY kickoff ASC",
-        (today.isoformat(), week_later),
-    ).fetchall()
-    conn.close()
-    result = []
-    for r in rows:
-        m = dict(r)
-        m["analysis"] = generate_analysis(m)
-        result.append(m)
-    return result
-
-
-@app.get("/predictions/{day}/free")
-def get_free_predictions(day: str):
-    conn = db()
-    rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff)=? AND free_access=1 ORDER BY confidence DESC",
-        (day,),
-    ).fetchall()
-    conn.close()
-    result = []
-    for r in rows:
-        m = dict(r)
-        m["analysis"] = generate_analysis(m)
-        result.append(m)
-    return result
-
-
-@app.get("/predictions/{day}/premium")
-def get_premium_predictions(day: str):
-    conn = db()
-    rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY confidence DESC", (day,)
-    ).fetchall()
-    conn.close()
-    result = []
-    for r in rows:
-        m = dict(r)
-        m["analysis"] = generate_analysis(m)
-        result.append(m)
-    return result
-
-
-@app.get("/matches/{match_id}/detail")
-def match_detail(match_id: int):
-    conn = db()
-    row = conn.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(404, "Match introuvable")
-    m = dict(row)
-    if m.get("exact_scores"):
-        try:
-            m["exact_scores"] = json.loads(m["exact_scores"])
-        except Exception:
-            m["exact_scores"] = []
-    m["analysis"] = generate_analysis(m)
-    return m
-
-
-@app.get("/leagues")
-def get_leagues():
-    conn = db()
-    rows = conn.execute("SELECT DISTINCT league FROM matches").fetchall()
-    conn.close()
-    return [r["league"] for r in rows]
 
 
 @app.post("/refresh")
