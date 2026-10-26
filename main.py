@@ -31,8 +31,8 @@ FC_LEAGUES = {
 GOAL_API_KEY = os.getenv("GOAL_API_KEY")
 GOAL_API_BASE_URL = "https://api.goal-api.com/v1"
 GOAL_API_LEAGUES = {
-    "ARG": "cmr77dvtc0093rx0667jirsnv",   # Argentina Liga Profesional
-    "CHN": "cmr77dvlv0067rx06potai161",   # Chinese Super League
+    "ARG": "cmr77dvtc0093rx0667jirsnv",
+    "CHN": "cmr77dvlv0067rx06potai161",
 }
 
 BASE_URL = "https://api.football-data.org/v4"
@@ -530,102 +530,29 @@ def generate_analysis(match: dict) -> str:
     ])
 
 
-# ===== GOAL API FETCH (Argentine + Chine) =====
-
-async def fetch_goal_api_fixtures(league_id: str, date_from: str, date_to: str):
-    """Récupère les fixtures via GOAL API, filtre par date."""
-    if not GOAL_API_KEY:
-        print("GOAL_API_KEY non definie")
-        return []
-    url = f"{GOAL_API_BASE_URL}/leagues/{league_id}/fixtures"
-    headers = {"Authorization": f"Bearer {GOAL_API_KEY}"}
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(url, headers=headers)
-            if r.status_code != 200:
-                print(f"Erreur GOAL API {league_id}: HTTP {r.status_code}")
-                return []
-            data = r.json()
-            if not data.get("success"):
-                print(f"Erreur GOAL API {league_id}: {data.get('message', 'unknown')}")
-                return []
-            fixtures = data.get("data", [])
-            # data peut être une liste directe ou un objet avec pagination
-            if isinstance(fixtures, dict):
-                fixtures = fixtures.get("fixtures", [])
-            filtered = []
-            for f in fixtures:
-                kickoff = f.get("kickoffUtc") or f.get("matchDate")
-                if kickoff and isinstance(kickoff, str):
-                    d = kickoff[:10]
-                    if date_from <= d <= date_to:
-                        filtered.append(f)
-                else:
-                    filtered.append(f)
-            print(f"GOAL API {league_id}: {len(fixtures)} bruts, {len(filtered)} dans la fenetre")
-            return filtered
-    except Exception as e:
-        print(f"Exception GOAL API {league_id}: {e}")
-        return []
-
-
-def convert_goal_api_to_internal(fixtures: list, league_code: str, league_name: str) -> list:
-    """Convertit le format GOAL API vers le format interne."""
-    converted = []
-    for f in fixtures:
-        try:
-            home = f.get("homeTeamName") or f.get("homeTeam", {}).get("name") or "?"
-            away = f.get("awayTeamName") or f.get("awayTeam", {}).get("name") or "?"
-            kickoff = f.get("kickoffUtc") or f.get("matchDate")
-            if not kickoff:
-                continue
-            if isinstance(kickoff, str) and "T" not in kickoff:
-                kickoff = kickoff + "T00:00:00"
-            status_raw = (f.get("matchStatus") or "SCHEDULED").upper()
-            if status_raw in ["LIVE", "IN_PLAY", "1H", "2H", "HT"]:
-                status = "IN_PLAY"
-            elif status_raw in ["FINISHED", "FT"]:
-                status = "FINISHED"
-            else:
-                status = "SCHEDULED"
-            slug = f.get("id") or f"{league_code}-{home}-{away}-{kickoff[:10]}"
-            match_id = abs(hash(slug)) % (10**12) + 3_000_000_000
-            internal_match = {
-                "id": match_id,
-                "homeTeam": {"name": home, "crest": None},
-                "awayTeam": {"name": away, "crest": None},
-                "utcDate": kickoff,
-                "status": status,
-                "score": {
-                    "fullTime": {
-                        "home": f.get("homeScore"),
-                        "away": f.get("awayScore"),
-                    }
-                },
-                "league": {"name": league_name, "country": "International"},
-                "_code": league_code,
-            }
-            converted.append(internal_match)
-        except Exception as e:
-            print(f"Erreur conversion GOAL API {f.get('id')}: {e}")
-    return converted
-
-
 # ===== FOOTBALL-CHARTS FETCH =====
 
 async def fetch_footballcharts_fixtures(league_key: str, date_from: str, date_to: str):
+    """Récupère les fixtures via football-charts.com avec saison et logs détaillés."""
+    season = date.today().year
+    if date.today().month < 7:
+        season -= 1
     url = f"{FC_BASE_URL}/leagues/{league_key}/fixtures/"
+    params = {"season": season}
     headers = {}
     if FC_API_KEY:
         headers["Authorization"] = f"Bearer {FC_API_KEY}"
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(url, headers=headers)
+            r = await client.get(url, headers=headers, params=params)
             if r.status_code != 200:
-                print(f"Erreur Football-Charts {league_key}: HTTP {r.status_code}")
+                print(f"Erreur Football-Charts {league_key}: HTTP {r.status_code} - {r.text[:200]}")
                 return []
             data = r.json()
-            fixtures = data if isinstance(data, list) else data.get("fixtures", [])
+            fixtures = data if isinstance(data, list) else data.get("fixtures", data.get("data", []))
+            if not fixtures:
+                print(f"Football-Charts {league_key}: reponse vide (raw: {str(data)[:200]})")
+                return []
             filtered = []
             for f in fixtures:
                 kickoff = (f.get("kickoff_utc") or f.get("kickoff") or
@@ -676,6 +603,84 @@ def convert_footballcharts_to_internal(fixtures: list, league_code: str, league_
             converted.append(internal_match)
         except Exception as e:
             print(f"Erreur conversion Football-Charts {f.get('slug')}: {e}")
+    return converted
+
+
+# ===== GOAL API FETCH =====
+
+async def fetch_goal_api_fixtures(league_id: str, date_from: str, date_to: str):
+    if not GOAL_API_KEY:
+        print("GOAL_API_KEY non definie")
+        return []
+    url = f"{GOAL_API_BASE_URL}/leagues/{league_id}/fixtures"
+    headers = {"Authorization": f"Bearer {GOAL_API_KEY}"}
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url, headers=headers)
+            if r.status_code != 200:
+                print(f"Erreur GOAL API {league_id}: HTTP {r.status_code} - {r.text[:200]}")
+                return []
+            data = r.json()
+            if not data.get("success"):
+                print(f"Erreur GOAL API {league_id}: {data.get('message', 'unknown')}")
+                return []
+            fixtures = data.get("data", [])
+            if isinstance(fixtures, dict):
+                fixtures = fixtures.get("fixtures", [])
+            filtered = []
+            for f in fixtures:
+                kickoff = f.get("kickoffUtc") or f.get("matchDate")
+                if kickoff and isinstance(kickoff, str):
+                    d = kickoff[:10]
+                    if date_from <= d <= date_to:
+                        filtered.append(f)
+                else:
+                    filtered.append(f)
+            print(f"GOAL API {league_id}: {len(fixtures)} bruts, {len(filtered)} dans la fenetre")
+            return filtered
+    except Exception as e:
+        print(f"Exception GOAL API {league_id}: {e}")
+        return []
+
+
+def convert_goal_api_to_internal(fixtures: list, league_code: str, league_name: str) -> list:
+    converted = []
+    for f in fixtures:
+        try:
+            home = f.get("homeTeamName") or f.get("homeTeam", {}).get("name") or "?"
+            away = f.get("awayTeamName") or f.get("awayTeam", {}).get("name") or "?"
+            kickoff = f.get("kickoffUtc") or f.get("matchDate")
+            if not kickoff:
+                continue
+            if isinstance(kickoff, str) and "T" not in kickoff:
+                kickoff = kickoff + "T00:00:00"
+            status_raw = (f.get("matchStatus") or "SCHEDULED").upper()
+            if status_raw in ["LIVE", "IN_PLAY", "1H", "2H", "HT"]:
+                status = "IN_PLAY"
+            elif status_raw in ["FINISHED", "FT"]:
+                status = "FINISHED"
+            else:
+                status = "SCHEDULED"
+            slug = f.get("id") or f"{league_code}-{home}-{away}-{kickoff[:10]}"
+            match_id = abs(hash(slug)) % (10**12) + 3_000_000_000
+            internal_match = {
+                "id": match_id,
+                "homeTeam": {"name": home, "crest": None},
+                "awayTeam": {"name": away, "crest": None},
+                "utcDate": kickoff,
+                "status": status,
+                "score": {
+                    "fullTime": {
+                        "home": f.get("homeScore"),
+                        "away": f.get("awayScore"),
+                    }
+                },
+                "league": {"name": league_name, "country": "International"},
+                "_code": league_code,
+            }
+            converted.append(internal_match)
+        except Exception as e:
+            print(f"Erreur conversion GOAL API {f.get('id')}: {e}")
     return converted
 
 
@@ -866,6 +871,11 @@ async def daily_pipeline():
         today = date.today()
         date_from = today.isoformat()
         date_to = (today + timedelta(days=DAYS_AHEAD)).isoformat()
+
+        # ✅ CORRECTION : definir season AVANT les appels Zafronix
+        season = today.year
+        if today.month < 7:
+            season -= 1
 
         all_matches = []
 
@@ -1694,7 +1704,6 @@ def get_tickets(day: str):
         if not all_picks:
             return {"error": "Aucun pick disponible", "date": day}
 
-        # === SAFE : cote ~2.5, confidence >= 0.70, 2-3 picks ===
         safe_pool = [p for p in all_picks if p.get("confidence", 0) >= 0.70]
         safe = _build_ticket_optimized(
             safe_pool,
@@ -1706,7 +1715,6 @@ def get_tickets(day: str):
         )
         safe_ids = {p["match_id"] for p in safe}
 
-        # === MEDIUM SHORT : cote ~55, confidence >= 0.55, 5-8 picks ===
         medium_short_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
@@ -1722,7 +1730,6 @@ def get_tickets(day: str):
         )
         medium_short_ids = {p["match_id"] for p in medium_short}
 
-        # === MEDIUM LONG : cote ~125, confidence >= 0.50, 7-10 picks ===
         medium_long_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
@@ -1739,7 +1746,6 @@ def get_tickets(day: str):
         )
         medium_long_ids = {p["match_id"] for p in medium_long}
 
-        # === RISKY : cote ~1000, confidence >= 0.35, 10-15 picks ===
         risky_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
