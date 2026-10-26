@@ -21,21 +21,26 @@ if not API_KEY:
 APISPORTS_KEY = os.getenv("APISPORTS_KEY")
 APISPORTS_HOST = "v3.football.api-sports.io"
 
+# IDs des compétitions gérées par API-Football (toutes gratuites dans la limite de 100 req/jour)
 API_FOOTBALL_LEAGUES = {
-    "CL": 2,
+    "CL": 2,       # Champions League
+    "MLS": 253,    # Major League Soccer
+    "SAU": 4633,   # Saudi Pro League (ID à vérifier)
+    "KOR": 292,    # K League 1 (ID à vérifier)
+    "ARG": 128,    # Argentine Primera División (ID à vérifier)
 }
 
 BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": API_KEY or ""}
 DB_PATH = "/tmp/sportia.db"
 _PIPELINE_RUNNING = False
+
+# Zafronix n'est plus utilisé pour la MLS
 ZAFRONIX_API_KEY = os.getenv("ZAFRONIX_API_KEY")
 ZAFRONIX_BASE_URL = "https://api.zafronix.com/uefa/europaleague/v1"
-ZAFRONIX_BASE_URL_MLS = "https://api.zafronix.com/usa/mls/v1"
 ZAFRONIX_BASE_URL_UECL = "https://api.zafronix.com/uefa/conferenceleague/v1"
 ZAFRONIX_LEAGUES = {
     "EL": "Europa League",
-    "MLS": "Major League Soccer",
     "UECL": "Conference League",
 }
 
@@ -43,10 +48,19 @@ COMPETITIONS = {
     "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
     "BL1": "Bundesliga", "FL1": "Ligue 1", "DED": "Eredivisie",
     "PPL": "Primeira Liga", "CL": "Champions League",
+    "BSA": "Campeonato Brasileiro",
+    "J1": "J1 League",
 }
+
 LEAGUE_AVG_GOALS = {
     "PL": 2.85, "PD": 2.65, "SA": 2.75, "BL1": 3.15, "FL1": 2.70,
     "DED": 3.20, "PPL": 2.55, "CL": 2.80, "EC": 2.60, "WC": 2.70,
+    "BSA": 2.75,   # Brésil, moyenne ~2.7-2.8 buts/match
+    "J1": 2.65,    # Japon, moyenne ~2.6-2.7
+    "MLS": 2.90,   # MLS, moyenne ~2.9
+    "SAU": 2.95,   # Arabie Saoudite, moyenne ~2.9-3.0
+    "KOR": 2.55,   # Corée, moyenne ~2.5-2.6
+    "ARG": 2.70,   # Argentine, moyenne ~2.7
 }
 
 DAYS_AHEAD = 7
@@ -55,8 +69,10 @@ _SQRT_HA = math.sqrt(HOME_ADVANTAGE)
 RHO = -0.05
 K_SHRINK = 10.0
 FREE_MATCHES_PER_DAY = 2
+
 LEAGUE_TOP_N = {
     "PL": 5, "PD": 4, "FL1": 4, "DED": 4, "BL1": 5, "PPL": 4,
+    "BSA": 5, "J1": 4,
 }
 
 _STANDINGS_CACHE = {}
@@ -249,7 +265,7 @@ def calc_expected_goals_v2e(league_code: str, home_team: str, away_team: str):
     base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
     conn = db()
     league_name = COMPETITIONS.get(league_code, "")
-    allow_any_league = league_code in ["CL", "EL", "UECL", "EC", "WC"]
+    allow_any_league = league_code in ["CL", "EL", "UECL", "EC", "WC", "MLS", "SAU", "KOR", "ARG"]
     prefixes = ["FC ", "AC ", "SC ", "AS ", "SS ", "SSC ", "CF ", "RC ",
                 "1. ", "SV ", "TSG ", "VfB ", "VfL ", "FK ", "SK ",
                 "CD ", "GD ", "CA ", "Real ", "Sporting ", "Club ",
@@ -496,7 +512,7 @@ async def fetch_competition_matches(code: str, date_from: str, date_to: str):
 async def fetch_apisports_matches(league_id: int, season: int, date_from: str, date_to: str):
     url = f"https://{APISPORTS_HOST}/fixtures"
     headers = {"x-apisports-key": APISPORTS_KEY}
-    params = {"league": league_id, "season": season, "from": date_from, "to": date_to}
+    params = {"league": league_id, "season": season, "from": date_from, "to": date_to, "timezone": "UTC"}
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.get(url, headers=headers, params=params)
@@ -563,33 +579,6 @@ async def fetch_zafronix_conference_league(season: int, date_from: str, date_to:
         return []
 
 
-async def fetch_zafronix_mls(season: int, date_from: str, date_to: str):
-    if not ZAFRONIX_API_KEY:
-        print("ZAFRONIX_API_KEY non definie")
-        return []
-    url = f"{ZAFRONIX_BASE_URL_MLS}/matches"
-    headers = {"X-API-Key": ZAFRONIX_API_KEY}
-    params = {"season": season}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url, headers=headers, params=params)
-            if r.status_code != 200:
-                print(f"Erreur Zafronix MLS : {r.status_code}")
-                return []
-            data = r.json()
-            events = data.get("matches") or data.get("data") or data
-            filtered = []
-            for ev in events:
-                ev_date = ev.get("date") or ev.get("utcDate") or ""
-                if ev_date and date_from <= ev_date[:10] <= date_to:
-                    filtered.append(ev)
-            print(f"Zafronix MLS : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
-            return filtered
-    except Exception as e:
-        print(f"Exception Zafronix MLS : {e}")
-        return []
-
-
 def convert_apisports_to_internal(api_matches: list, league_code: str, league_name: str) -> list:
     converted = []
     for match in api_matches:
@@ -599,6 +588,12 @@ def convert_apisports_to_internal(api_matches: list, league_code: str, league_na
             status_short = fixture.get("status", {}).get("short", "NS")
             if status_short not in ["NS", "TBD", "1H", "HT", "2H", "ET", "BT", "P"]:
                 continue
+            if status_short == "NS":
+                status = "TIMED"
+            elif status_short == "TBD":
+                status = "SCHEDULED"
+            else:
+                status = "IN_PLAY"
             internal_match = {
                 "id": fixture.get("id"),
                 "homeTeam": {
@@ -610,9 +605,9 @@ def convert_apisports_to_internal(api_matches: list, league_code: str, league_na
                     "crest": teams.get("away", {}).get("logo"),
                 },
                 "utcDate": fixture.get("date"),
-                "status": "SCHEDULED" if status_short in ["NS", "TBD"] else "IN_PLAY",
+                "status": status,
                 "score": {"fullTime": {"home": None, "away": None}},
-                "league": {"name": league_name, "country": "Europe"},
+                "league": {"name": league_name, "country": "International"},
                 "_code": league_code,
             }
             converted.append(internal_match)
@@ -711,6 +706,7 @@ async def daily_pipeline():
         date_to = (today + timedelta(days=DAYS_AHEAD)).isoformat()
 
         all_matches = []
+        # football-data.org (ligues gratuites)
         for code in COMPETITIONS:
             matches = await fetch_competition_matches(code, date_from, date_to)
             for m in matches:
@@ -718,6 +714,7 @@ async def daily_pipeline():
             all_matches.extend(matches)
             await asyncio.sleep(7)
 
+        # API-Football (toutes les ligues de API_FOOTBALL_LEAGUES)
         season = today.year
         if today.month < 7:
             season -= 1
@@ -731,6 +728,7 @@ async def daily_pipeline():
             except Exception as e:
                 print(f"Erreur API-Sports {code}: {e}")
 
+        # Zafronix (Europa League et Conference League)
         if ZAFRONIX_API_KEY:
             try:
                 zaf_events = await fetch_zafronix_europa_league(season, date_from, date_to)
@@ -750,17 +748,6 @@ async def daily_pipeline():
                 await asyncio.sleep(1)
             except Exception as e:
                 print(f"Erreur Zafronix UECL: {e}")
-
-        if ZAFRONIX_API_KEY:
-            try:
-                mls_season = today.year
-                mls_events = await fetch_zafronix_mls(mls_season, date_from, date_to)
-                converted = convert_zafronix_to_internal(mls_events, "MLS", "Major League Soccer")
-                all_matches.extend(converted)
-                await asyncio.sleep(1)
-            except Exception as e:
-                print(f"Erreur Zafronix MLS: {e}")
-                await asyncio.sleep(10)
 
         print("Recuperation des stats d'equipes...")
         for code, league_name in COMPETITIONS.items():
@@ -805,6 +792,14 @@ async def daily_pipeline():
                 ht_away = m.get("score", {}).get("halfTime", {}).get("away")
 
                 home_xg, away_xg = calc_expected_goals_v2e(code, home, away)
+
+                # Fallback logos MLS et autres ligues sans crest
+                if code in ["MLS", "SAU", "KOR", "ARG"]:
+                    if not logos.get(home):
+                        logos[home] = await get_team_logo({"name": home})
+                    if not logos.get(away):
+                        logos[away] = await get_team_logo({"name": away})
+
                 pred = predict_all_markets(home_xg, away_xg)
                 ext = predict_extended_markets(
                     home_xg, away_xg,
