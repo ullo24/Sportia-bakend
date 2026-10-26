@@ -1767,70 +1767,7 @@ def get_leagues():
 
 
 
-        # === ENRICHISSEMENT : evaluation de chaque pick ===
-match_map = {dict(r)["id"]: dict(r) for r in rows}
-
-def enrich_picks(picks):
-        for p in picks:
-            match = match_map.get(p["match_id"])
-                if match:
-                    try:
-                        ev = _evaluate_pick(p, match)
-                        p["result"] = ev["result"]
-                        p["reason"] = ev["reason"]
-                        p["current_score"] = ev["current_score"]
-                        p["match_status"] = match.get("status")
-                        p["kickoff"] = match.get("kickoff")
-                    except Exception:
-                        p["result"] = "pending"
-                        p["reason"] = "Erreur evaluation"
-                        p["current_score"] = None
-                else:
-                    p["result"] = "pending"
-                    p["reason"] = "Match introuvable"
-                    p["current_score"] = None
-            return picks
-
-        safe = enrich_picks(safe)
-        medium = enrich_picks(medium)
-        risky_list = enrich_picks(risky_list)
-
-def safe_cote(lst):
-    try:
-        return _calc_total_cote(lst) if lst else 1.0
-            except Exception:
-                return 1.0
-
-        return {
-            "date": day,
-            "safe": {
-                "name": "Ticket Safe",
-                "total_cote": safe_cote(safe),
-                "count": len(safe),
-                "picks": safe,
-            },
-            "medium": {
-                "name": "Ticket Medium",
-                "total_cote": safe_cote(medium),
-                "count": len(medium),
-                "picks": medium,
-            },
-            "risky": {
-                "name": "Ticket Risky",
-                "total_cote": safe_cote(risky_list),
-                "count": len(risky_list),
-                "picks": risky_list,
-            },
-        }
-    except Exception as e:
-        print(f"Erreur get_tickets: {e}")
-        return {
-            "error": f"Erreur interne: {str(e)}",
-            "date": day,
-            "safe": {"name": "Ticket Safe", "total_cote": 1.0, "count": 0, "picks": []},
-            "medium": {"name": "Ticket Medium", "total_cote": 1.0, "count": 0, "picks": []},
-            "risky": {"name": "Ticket Risky", "total_cote": 1.0, "count": 0, "picks": []},
-        }
+       
 # ===== PREDICTIONS JUSTES =====
 
 def _check_won_markets(m):
@@ -1993,6 +1930,61 @@ async def get_live_scores(day: str, refresh: bool = False):
 
 # Force redeploy 2026-10-18 22:00
 
+def _calc_risky_pick(m):
+    """Choisit le pick risky selon criteres metier, cible ~1.80-2.20."""
+    hw = m.get("home_win") or 0
+    d = m.get("draw") or 0
+    aw = m.get("away_win") or 0
+    over_25 = m.get("over_25") or 0
+    over_35 = m.get("over_35") or 0
+    under_25 = m.get("under_25") or 0
+    btts = m.get("btts_yes") or 0
+    fh_goal = m.get("first_half_goal") or 0
+    fh_over_15 = m.get("first_half_over_15") or 0
+    hcp2_home = m.get("handicap_home_minus2") or 0
+    hcp2_away = m.get("handicap_away_minus2") or 0
+    home_xg = m.get("home_xg") or 0
+    away_xg = m.get("away_xg") or 0
+    total_xg = m.get("total_xg") or 0
+
+    candidates = []
+
+    if hw >= 0.75:
+        candidates.append(("1", m["home"], hw, 1.0 / hw))
+    if aw >= 0.75:
+        candidates.append(("2", m["away"], aw, 1.0 / aw))
+    if home_xg < 1.3 and away_xg < 1.3 and hw < 0.40 and aw < 0.40 and d >= 0.28:
+        candidates.append(("X", "Match nul", d, 1.0 / d))
+    if hw > 0.70 and home_xg > 1.9 and away_xg < 1.0 and hcp2_home > 0.28:
+        candidates.append(("H-2 D", "Handicap -2 " + m["home"], hcp2_home, 1.0 / hcp2_home))
+    if aw > 0.70 and away_xg > 1.9 and home_xg < 1.0 and hcp2_away > 0.28:
+        candidates.append(("H-2 E", "Handicap -2 " + m["away"], hcp2_away, 1.0 / hcp2_away))
+    if 0.62 <= over_25 <= 0.72:
+        candidates.append(("+2.5", "+2.5 buts", over_25, 1.0 / over_25))
+    if 0.55 <= btts <= 0.77:
+        candidates.append(("BTTS", "Les 2 equipes marquent", btts, 1.0 / btts))
+    if total_xg > 3.8 and over_35 > 0.50:
+        candidates.append(("+3.5", "+3.5 buts", over_35, 1.0 / over_35))
+    if fh_goal >= 0.65:
+        candidates.append(("1MT", "But en 1ere MT", fh_goal, 1.0 / fh_goal))
+    if total_xg > 3.8 and fh_over_15 >= 0.45:
+        candidates.append(("+1.5 1MT", "+1.5 buts 1ere MT", fh_over_15, 1.0 / fh_over_15))
+    if total_xg < 2.3 and under_25 > 0.55:
+        candidates.append(("-2.5", "-2.5 buts", under_25, 1.0 / under_25))
+
+    if not candidates:
+        return None
+
+    best = min(candidates, key=lambda x: abs(x[3] - 2.0))
+
+    return {
+        "match_id": m["id"], "home": m["home"], "away": m["away"],
+        "league": m["league"], "kickoff": m["kickoff"],
+        "home_logo": m["home_logo"], "away_logo": m["away_logo"],
+        "market": best[0], "description": best[1],
+        "proba": round(best[2], 3), "cote": round(best[3], 2),
+    }
+    
 @app.get("/tickets-week")
 async def get_tickets_week():
     """Ticket semaine : 1 pick par match eligible (top equipes)."""
