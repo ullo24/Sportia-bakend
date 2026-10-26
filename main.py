@@ -976,49 +976,6 @@ def mark_free_access():
 
 # ===== TICKETS =====
 
-def _all_picks_for_match(m):
-    markets = [
-        ("1", m.get("home_win"), m["home"]),
-        ("X", m.get("draw"), "Match nul"),
-        ("2", m.get("away_win"), m["away"]),
-        ("+0.5", m.get("over_05"), "Over 0.5 but"),
-        ("+1.5", m.get("over_15"), "+1.5 buts"),
-        ("+2.5", m.get("over_25"), "+2.5 buts"),
-        ("-3.5", m.get("under_35"), "-3.5 buts"),
-        ("-4.5", m.get("under_45"), "-4.5 buts"),
-        ("BTTS", m.get("btts_yes"), "Les 2 equipes marquent"),
-        ("1MT", m.get("first_half_goal"), "But en 1ere MT"),
-        ("1X", m.get("dc_1x"), "Double Chance 1X"),
-        ("12", m.get("dc_12"), "Double Chance 12"),
-        ("X2", m.get("dc_x2"), "Double Chance X2"),
-        ("DNB D", m.get("dnb_home"), "Draw No Bet Domicile"),
-        ("DNB E", m.get("dnb_away"), "Draw No Bet Exterieur"),
-        ("BTTS+2.5", m.get("btts_over_25"), "BTTS & Over 2.5"),
-        ("BTTS-3.5", m.get("btts_under_35"), "BTTS & Under 3.5"),
-        ("H-1 D", m.get("handicap_home_minus1"), "Handicap -1 Domicile"),
-        ("H-1 E", m.get("handicap_away_minus1"), "Handicap -1 Exterieur"),
-        ("H+1 D", m.get("handicap_home_plus1"), "Handicap +1 Domicile"),
-        ("H+1 E", m.get("handicap_away_plus1"), "Handicap +1 Exterieur"),
-        ("Dom. marque", m.get("home_scores"), "Domicile marque"),
-        ("Ext. marque", m.get("away_scores"), "Exterieur marque"),
-    ]
-    picks = []
-    for label, prob, desc in markets:
-        if prob is None:
-            continue
-        if prob < 0.40 or prob > 0.85:
-            continue
-        cote = 1.0 / prob
-        if cote < 1.20 or cote > 2.50:
-            continue
-        picks.append({
-            "match_id": m["id"], "home": m["home"], "away": m["away"],
-            "league": m["league"], "kickoff": m["kickoff"],
-            "home_logo": m["home_logo"], "away_logo": m["away_logo"],
-            "market": label, "description": desc,
-            "proba": round(prob, 3), "cote": round(cote, 2),
-        })
-    return picks
 
 
 def _calc_total_cote(picks):
@@ -1028,33 +985,6 @@ def _calc_total_cote(picks):
     return round(c, 2)
 
 
-def _build_ticket(pool, target_cote, min_n, max_n):
-    if not pool:
-        return []
-    best = []
-    best_diff = float('inf')
-    for n in range(min_n, max_n + 1):
-        if n > len(pool):
-            break
-        avg_needed = target_cote ** (1.0 / n)
-        sorted_pool = sorted(pool, key=lambda p: abs(p["cote"] - avg_needed))
-        combo = []
-        used = set()
-        for p in sorted_pool:
-            if p["match_id"] in used:
-                continue
-            combo.append(p)
-            used.add(p["match_id"])
-            if len(combo) >= n:
-                break
-        if len(combo) < n:
-            continue
-        cote = _calc_total_cote(combo)
-        diff = abs(cote - target_cote)
-        if diff < best_diff:
-            best_diff = diff
-            best = combo
-    return best
 
 def convert_apisports_to_internal(api_matches: list, league_code: str, league_name: str) -> list:
     """Convertit le format API-Sports vers le format interne (football-data.org)."""
@@ -1436,79 +1366,278 @@ def _evaluate_pick(pick, match):
         "reason": reason,
         "current_score": str(hg) + "-" + str(ag),
     }
-    
-def _calc_risky_pick(m):
-    """Choisit le pick risky selon criteres metier, en preferant la cible ~1.80-2.20."""
-    hw = m.get("home_win") or 0
-    d = m.get("draw") or 0
-    aw = m.get("away_win") or 0
-    over_25 = m.get("over_25") or 0
-    over_35 = m.get("over_35") or 0
-    under_25 = m.get("under_25") or 0
-    btts = m.get("btts_yes") or 0
-    fh_goal = m.get("first_half_goal") or 0
-    fh_over_15 = m.get("first_half_over_15") or 0
-    hcp2_home = m.get("handicap_home_minus2") or 0
-    hcp2_away = m.get("handicap_away_minus2") or 0
-    home_xg = m.get("home_xg") or 0
-    away_xg = m.get("away_xg") or 0
-    total_xg = m.get("total_xg") or 0
+# ===== TICKETS — VERSION OPTIMISÉE =====
 
-    candidates = []
+# Groupes de corrélation (pour éviter les picks qui prédisent la même chose)
+_MARKET_GROUP = {
+    "1": "home", "DNB D": "home", "H-1 D": "home", "H+1 D": "home",
+    "Dom. marque": "home",
+    "X": "draw",
+    "1X": "no_away", "X2": "no_home", "12": "no_draw",
+    "2": "away", "DNB E": "away", "H-1 E": "away", "H+1 E": "away",
+    "Ext. marque": "away",
+    "+0.5": "over", "+1.5": "over", "+2.5": "over", "+3.5": "over",
+    "-2.5": "under", "-3.5": "under", "-4.5": "under",
+    "BTTS": "btts", "BTTS+2.5": "btts", "BTTS-3.5": "btts",
+    "1MT": "first_half",
+}
 
-    # 1. V1 ou V2 si proba >= 75%
-    if hw >= 0.75:
-        candidates.append(("1", m["home"], hw, 1.0 / hw))
-    if aw >= 0.75:
-        candidates.append(("2", m["away"], aw, 1.0 / aw))
 
-    # 2. X si les 2 equipes faibles en attaque
-    if home_xg < 1.3 and away_xg < 1.3 and hw < 0.40 and aw < 0.40 and d >= 0.28:
-        candidates.append(("X", "Match nul", d, 1.0 / d))
+def _all_picks_for_match(m):
+    """Un pick par marché, filtres élargis (0.30–0.95 proba, 1.05–3.33 cote)."""
+    markets = [
+        ("1", m.get("home_win"), m["home"]),
+        ("X", m.get("draw"), "Match nul"),
+        ("2", m.get("away_win"), m["away"]),
+        ("+0.5", m.get("over_05"), "Over 0.5 but"),
+        ("+1.5", m.get("over_15"), "+1.5 buts"),
+        ("+2.5", m.get("over_25"), "+2.5 buts"),
+        ("+3.5", m.get("over_35"), "+3.5 buts"),
+        ("-2.5", m.get("under_25"), "-2.5 buts"),
+        ("-3.5", m.get("under_35"), "-3.5 buts"),
+        ("-4.5", m.get("under_45"), "-4.5 buts"),
+        ("BTTS", m.get("btts_yes"), "Les 2 équipes marquent"),
+        ("1MT", m.get("first_half_goal"), "But en 1ère MT"),
+        ("1X", m.get("dc_1x"), "Double Chance 1X"),
+        ("12", m.get("dc_12"), "Double Chance 12"),
+        ("X2", m.get("dc_x2"), "Double Chance X2"),
+        ("DNB D", m.get("dnb_home"), "Draw No Bet Domicile"),
+        ("DNB E", m.get("dnb_away"), "Draw No Bet Extérieur"),
+        ("BTTS+2.5", m.get("btts_over_25"), "BTTS & Over 2.5"),
+        ("BTTS-3.5", m.get("btts_under_35"), "BTTS & Under 3.5"),
+        ("H-1 D", m.get("handicap_home_minus1"), "Handicap -1 Domicile"),
+        ("H-1 E", m.get("handicap_away_minus1"), "Handicap -1 Extérieur"),
+        ("H+1 D", m.get("handicap_home_plus1"), "Handicap +1 Domicile"),
+        ("H+1 E", m.get("handicap_away_plus1"), "Handicap +1 Extérieur"),
+        ("Dom. marque", m.get("home_scores"), "Domicile marque"),
+        ("Ext. marque", m.get("away_scores"), "Extérieur marque"),
+    ]
+    picks = []
+    for label, prob, desc in markets:
+        if prob is None:
+            continue
+        if prob < 0.30 or prob > 0.95:          # élargi (avant 0.40–0.85)
+            continue
+        cote = 1.0 / prob
+        if cote < 1.05 or cote > 3.33:           # élargi (avant 1.20–2.50)
+            continue
+        picks.append({
+            "match_id": m["id"], "home": m["home"], "away": m["away"],
+            "league": m["league"], "kickoff": m["kickoff"],
+            "home_logo": m["home_logo"], "away_logo": m["away_logo"],
+            "market": label, "description": desc,
+            "proba": round(prob, 4), "cote": round(cote, 2),
+            "group": _MARKET_GROUP.get(label, "other"),
+        })
+    return picks
 
-    # 3. Handicap -2 si favori largement superieur
-    if hw > 0.70 and home_xg > 1.9 and away_xg < 1.0 and hcp2_home > 0.28:
-        candidates.append(("H-2 D", "Handicap -2 " + m["home"], hcp2_home, 1.0 / hcp2_home))
-    if aw > 0.70 and away_xg > 1.9 and home_xg < 1.0 and hcp2_away > 0.28:
-        candidates.append(("H-2 E", "Handicap -2 " + m["away"], hcp2_away, 1.0 / hcp2_away))
 
-    # 4. +2.5 buts si cote 1.4-1.6
-    if 0.62 <= over_25 <= 0.72:
-        candidates.append(("+2.5", "+2.5 buts", over_25, 1.0 / over_25))
+def _build_ticket_optimized(pool, target_cote, min_n, max_n,
+                             min_proba=0.50, max_per_market=2,
+                             max_per_group=3):
+    """
+    Construit un ticket qui:
+    - respecte min_proba (chaque pick >= min_proba)
+    - respecte diversité (max max_per_market par marché, max_per_group par groupe)
+    - un seul pick par match
+    - minimise |cote_totale - target_cote|
+    - maximise la proba jointe (implicite: joint = 1/cote si indépendants)
+    """
+    if not pool:
+        return []
 
-    # 5. BTTS si cote 1.3-1.8
-    if 0.55 <= btts <= 0.77:
-        candidates.append(("BTTS", "Les 2 equipes marquent", btts, 1.0 / btts))
+    # Filtrer par proba minimale
+    filtered = [p for p in pool if p["proba"] >= min_proba]
+    if len(filtered) < min_n:
+        # Fallback: relâcher min_proba
+        filtered = sorted(pool, key=lambda p: -p["proba"])[:max(max_n * 3, 15)]
 
-    # 6. +3.5 buts SEULEMENT si 2 attaques fortes (plus strict)
-    if total_xg > 3.8 and over_35 > 0.50:
-        candidates.append(("+3.5", "+3.5 buts", over_35, 1.0 / over_35))
+    if len(filtered) < min_n:
+        return []
 
-    # 7. But en 1ere MT si probable
-    if fh_goal >= 0.65:
-        candidates.append(("1MT", "But en 1ere MT", fh_goal, 1.0 / fh_goal))
+    best_combo = None
+    best_diff = float('inf')
 
-    # 8. +1.5 1ere MT SEULEMENT si match tres offensif (plus strict qu'avant)
-    if total_xg > 3.8 and fh_over_15 >= 0.45:
-        candidates.append(("+1.5 1MT", "+1.5 buts 1ere MT", fh_over_15, 1.0 / fh_over_15))
+    for n in range(min_n, min(max_n, len(filtered)) + 1):
+        ideal_per_pick = target_cote ** (1.0 / n)
 
-    # 9. -2.5 buts si match ferme
-    if total_xg < 2.3 and under_25 > 0.55:
-        candidates.append(("-2.5", "-2.5 buts", under_25, 1.0 / under_25))
+        # Trier par distance au cote idéal (puis par proba décroissante)
+        candidates = sorted(
+            filtered,
+            key=lambda p: (abs(p["cote"] - ideal_per_pick), -p["proba"])
+        )
 
-    if not candidates:
-        return None
+        combo = []
+        used_matches = set()
+        market_count = {}
+        group_count = {}
 
-    # Prend la cote la PLUS PROCHE de 2.0 (compromis risque/gain)
-    best = min(candidates, key=lambda x: abs(x[3] - 2.0))
+        for p in candidates:
+            if len(combo) >= n:
+                break
+            if p["match_id"] in used_matches:
+                continue
+            mk = p["market"]
+            if market_count.get(mk, 0) >= max_per_market:
+                continue
+            gr = p.get("group", "other")
+            if group_count.get(gr, 0) >= max_per_group:
+                continue
+            combo.append(p)
+            used_matches.add(p["match_id"])
+            market_count[mk] = market_count.get(mk, 0) + 1
+            group_count[gr] = group_count.get(gr, 0) + 1
 
+        if len(combo) < min_n:
+            continue
+
+        cote = _calc_total_cote(combo)
+        diff = abs(cote - target_cote)
+
+        # Favoriser les combos plus proches du target, puis les plus "sûrs"
+        joint = 1.0
+        for p in combo:
+            joint *= p["proba"]
+
+        # Score composite: distance au target (dominant) + pénalité si joint trop faible
+        score = diff
+        if joint < 1.0 / (target_cote * 10):  # joint < 10% du théorique
+            score += 1000  # pénaliser
+
+        if score < best_diff:
+            best_diff = score
+            best_combo = combo
+
+    return best_combo or []
+
+
+def _summarize_ticket(picks):
+    """Métriques d'un ticket: cote, proba jointe, count."""
+    if not picks:
+        return {"total_cote": 1.0, "count": 0,
+                "joint_prob": 0.0, "joint_prob_pct": 0.0, "picks": []}
+    total_cote = _calc_total_cote(picks)
+    joint = 1.0
+    for p in picks:
+        joint *= p["proba"]
     return {
-        "match_id": m["id"], "home": m["home"], "away": m["away"],
-        "league": m["league"], "kickoff": m["kickoff"],
-        "home_logo": m["home_logo"], "away_logo": m["away_logo"],
-        "market": best[0], "description": best[1],
-        "proba": round(best[2], 3), "cote": round(best[3], 2),
+        "total_cote": total_cote,
+        "count": len(picks),
+        "joint_prob": round(joint, 6),
+        "joint_prob_pct": round(joint * 100, 2),
+        "picks": picks,
     }
+
+
+@app.get("/tickets/{day}")
+def get_tickets(day: str):
+    """Génère 3 tickets (Safe / Medium / Risky) optimisés."""
+    try:
+        conn = db()
+        rows = conn.execute(
+            "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC",
+            (day,),
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            return {"error": "Aucun match pour cette date", "date": day}
+
+        # Collecte des picks
+        all_picks = []
+        for r in rows:
+            m = dict(r)
+            try:
+                all_picks.extend(_all_picks_for_match(m))
+            except Exception as e:
+                print(f"Erreur picks match {m.get('id')}: {e}")
+
+        if not all_picks:
+            return {"error": "Aucun pick disponible", "date": day}
+
+        # === SAFE : 2-3 picks, chaque pick >= 65%, joint ~50%, cote 1.5-3.0 ===
+        safe = _build_ticket_optimized(
+            all_picks,
+            target_cote=2.0,
+            min_n=2, max_n=3,
+            min_proba=0.65,
+            max_per_market=2,
+            max_per_group=2,
+        )
+        safe_ids = {p["match_id"] for p in safe}
+
+        # === MEDIUM : 4-6 picks, chaque pick >= 55%, joint ~10%, cote 6-15 ===
+        medium_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
+        medium = _build_ticket_optimized(
+            medium_pool,
+            target_cote=10.0,
+            min_n=4, max_n=6,
+            min_proba=0.55,
+            max_per_market=2,
+            max_per_group=3,
+        )
+        medium_ids = {p["match_id"] for p in medium}
+
+        # === RISKY : 6-10 picks, chaque pick >= 45%, joint ~2%, cote 20-80 ===
+        risky_pool = [
+            p for p in all_picks
+            if p["match_id"] not in safe_ids
+            and p["match_id"] not in medium_ids
+        ]
+        risky = _build_ticket_optimized(
+            risky_pool,
+            target_cote=40.0,
+            min_n=6, max_n=10,
+            min_proba=0.45,
+            max_per_market=3,
+            max_per_group=4,
+        )
+
+        # === Enrichissement (résultat, raison, score live) ===
+        match_map = {dict(r)["id"]: dict(r) for r in rows}
+
+        def enrich(picks):
+            for p in picks:
+                match = match_map.get(p["match_id"])
+                if match:
+                    try:
+                        ev = _evaluate_pick(p, match)
+                        p["result"] = ev["result"]
+                        p["reason"] = ev["reason"]
+                        p["current_score"] = ev["current_score"]
+                        p["match_status"] = match.get("status")
+                        p["kickoff"] = match.get("kickoff")
+                    except Exception:
+                        p["result"] = "pending"
+                        p["reason"] = "Erreur evaluation"
+                        p["current_score"] = None
+                else:
+                    p["result"] = "pending"
+                    p["reason"] = "Match introuvable"
+                    p["current_score"] = None
+            return picks
+
+        safe = enrich(safe)
+        medium = enrich(medium)
+        risky = enrich(risky)
+
+        return {
+            "date": day,
+            "safe":   {"name": "Ticket Safe",   **_summarize_ticket(safe)},
+            "medium": {"name": "Ticket Medium", **_summarize_ticket(medium)},
+            "risky":  {"name": "Ticket Risky",  **_summarize_ticket(risky)},
+        }
+
+    except Exception as e:
+        print(f"Erreur get_tickets: {e}")
+        import traceback; traceback.print_exc()
+        return {
+            "error": f"Erreur interne: {str(e)}",
+            "date": day,
+            "safe":   {"name": "Ticket Safe",   "total_cote": 1.0, "count": 0, "picks": []},
+            "medium": {"name": "Ticket Medium", "total_cote": 1.0, "count": 0, "picks": []},
+            "risky":  {"name": "Ticket Risky",  "total_cote": 1.0, "count": 0, "picks": []},
+        }    
 
 # ===== APP =====
 
@@ -1637,137 +1766,6 @@ def get_leagues():
     return [r["league"] for r in rows]
 
 
-@app.get("/tickets/{day}")
-def get_tickets(day: str):
-    """Genere les 3 tickets avec evaluation gagne/perdu/en attente."""
-    try:
-        conn = db()
-        rows = conn.execute(
-            "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)
-        ).fetchall()
-        conn.close()
-
-        if not rows:
-            return {"error": "Aucun match pour cette date", "date": day}
-
-        # Collecte des picks
-        all_picks = []
-        for r in rows:
-            m = dict(r)
-            try:
-                all_picks.extend(_all_picks_for_match(m))
-            except Exception:
-                pass
-
-        if not all_picks:
-            return {"error": "Aucun pick disponible", "date": day}
-
-        # SAFE
-        try:
-            safe = _build_ticket(all_picks, 2.0, 2, 3)
-            if safe is None or not isinstance(safe, list):
-                safe = []
-        except Exception:
-            safe = []
-
-        safe_ids = {p["match_id"] for p in safe}
-
-        # MEDIUM
-        try:
-            medium_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
-            medium = _build_ticket(medium_pool, 120.0, 4, 15)
-            if medium is None or not isinstance(medium, list):
-                medium = []
-        except Exception:
-            medium = []
-
-        # RISKY
-        risky_list = []
-        try:
-            risky_picks = []
-            used_ids = set()
-            market_count = {}
-            MAX_PER_MARKET = 3
-
-            for r in rows:
-                m = dict(r)
-                try:
-                    pick = _calc_risky_pick(m)
-                except Exception:
-                    pick = None
-                if not pick:
-                    continue
-                mk = pick["market"]
-                if market_count.get(mk, 0) >= MAX_PER_MARKET:
-                    continue
-                risky_picks.append(pick)
-                used_ids.add(m["id"])
-                market_count[mk] = market_count.get(mk, 0) + 1
-
-            if len(risky_picks) < 8:
-                for r in rows:
-                    m = dict(r)
-                    if m["id"] in used_ids:
-                        continue
-                    best_pick = None
-                    best_dist = 999
-                    for label, prob, desc in [
-                        ("+2.5", m.get("over_25"), "+2.5 buts"),
-                        ("+3.5", m.get("over_35"), "+3.5 buts"),
-                        ("BTTS", m.get("btts_yes"), "Les 2 equipes marquent"),
-                        ("1MT", m.get("first_half_goal"), "But en 1ere MT"),
-                        ("-2.5", m.get("under_25"), "-2.5 buts"),
-                        ("+1.5 1MT", m.get("first_half_over_15"), "+1.5 1ere MT"),
-                    ]:
-                        if not prob:
-                            continue
-                        try:
-                            cote = 1.0 / prob
-                        except Exception:
-                            continue
-                        if cote < 1.30 or cote > 3.5:
-                            continue
-                        if market_count.get(label, 0) >= MAX_PER_MARKET:
-                            continue
-                        dist = abs(cote - 2.0)
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_pick = {
-                                "match_id": m["id"], "home": m["home"], "away": m["away"],
-                                "league": m["league"], "kickoff": m["kickoff"],
-                                "home_logo": m["home_logo"], "away_logo": m["away_logo"],
-                                "market": label, "description": desc,
-                                "proba": round(prob, 3), "cote": round(cote, 2),
-                            }
-                    if best_pick:
-                        risky_picks.append(best_pick)
-                        used_ids.add(m["id"])
-                        mk = best_pick["market"]
-                        market_count[mk] = market_count.get(mk, 0) + 1
-
-            if len(risky_picks) < 3:
-                for r in rows:
-                    m = dict(r)
-                    if m["id"] in used_ids:
-                        continue
-                    prob = m.get("over_15")
-                    if prob:
-                        risky_picks.append({
-                            "match_id": m["id"], "home": m["home"], "away": m["away"],
-                            "league": m["league"], "kickoff": m["kickoff"],
-                            "home_logo": m["home_logo"], "away_logo": m["away_logo"],
-                            "market": "+1.5", "description": "+1.5 buts",
-                            "proba": round(prob, 3), "cote": round(1.0 / prob, 2),
-                        })
-                        used_ids.add(m["id"])
-
-            risky_result = _build_ticket(risky_picks, 1500.0, 3, 20)
-            if risky_result is None or not isinstance(risky_result, list):
-                risky_result = risky_picks[:15] if risky_picks else []
-            risky_list = risky_result
-        except Exception as e:
-            print(f"Erreur risky: {e}")
-            risky_list = []
 
         # === ENRICHISSEMENT : evaluation de chaque pick ===
         match_map = {dict(r)["id"]: dict(r) for r in rows}
