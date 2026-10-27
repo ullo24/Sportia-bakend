@@ -1800,6 +1800,7 @@ def get_tickets(day: str):
         return {
             "date": day,
             "safe":         {"name": "Ticket Safe",         **_summarize_ticket(safe)},
+            "medium":       {"name": "Ticket Medium Short", **_summarize_ticket(medium_short)},
             "medium_short": {"name": "Ticket Medium Short", **_summarize_ticket(medium_short)},
             "medium_long":  {"name": "Ticket Medium Long",  **_summarize_ticket(medium_long)},
             "risky":        {"name": "Ticket Risky",        **_summarize_ticket(risky)},
