@@ -1550,11 +1550,11 @@ def _pick_best_for_match(picks_for_match, min_cote=1.2, max_cote=1.6):
     )
     return sorted_all[0] if sorted_all else None
 
-def _build_weekly_ticket(all_picks):
+def _build_weekly_ticket(all_picks, max_per_league=5):
     """
     Construit un ticket semaine avec TOUS les matchs top teams.
     - 1 pick par match (le meilleur dans la plage 1.2-1.6)
-    - Pas de limite par ligue, ni de nombre de matchs
+    - Limite max_per_league par ligue (défaut 5, pour éviter redondance)
     - Fallback si aucun pick dans la plage
     """
     if not all_picks:
@@ -1566,12 +1566,18 @@ def _build_weekly_ticket(all_picks):
         mid = p["match_id"]
         by_match.setdefault(mid, []).append(p)
 
-    # Prendre le meilleur pick par match
+    # Prendre le meilleur pick par match, limiter par ligue
     selected = []
+    league_count = {}
     for mid, picks in by_match.items():
         best = _pick_best_for_match(picks, min_cote=1.2, max_cote=1.6)
-        if best:
-            selected.append(best)
+        if not best:
+            continue
+        lg = best.get("league", "")
+        if league_count.get(lg, 0) >= max_per_league:
+            continue
+        selected.append(best)
+        league_count[lg] = league_count.get(lg, 0) + 1
 
     return selected
 
@@ -2050,23 +2056,10 @@ async def get_tickets_week():
     if not all_picks:
         return {"error": "Aucun pick trouve"}
 
-        # 6. Filtrer par confiance (garder les meilleurs picks)
-    best_picks = [p for p in all_picks if p.get("confidence", 0) >= 0.70]
-    if len(best_picks) < 10:
-        # Fallback progressif si pas assez de picks
-        best_picks = [p for p in all_picks if p.get("confidence", 0) >= 0.60]
-    if len(best_picks) < 5:
-        best_picks = all_picks
-
-    print(f"Ticket semaine : {len(best_picks)} picks retenus "
-          f"(seuil confidence applique)")
-
-    # 7. Construire le ticket (1 pick par match, cote 1.2-1.6)
-    selected = _build_weekly_ticket(best_picks)
-    if not selected:
-        return {"error": "Impossible de construire le ticket"}
-
-    # 8. Enrichir avec évaluation
+    # 6. Construire le ticket (1 pick par match, cote 1.2-1.6) — tous les matchs
+    selected = _build_weekly_ticket(all_picks)
+    
+    # 7. Enrichir avec évaluation
     match_map = {m["id"]: m for m in eligible}
     for p in selected:
         match = match_map.get(p["match_id"])
@@ -2086,7 +2079,7 @@ async def get_tickets_week():
             p["reason"] = "Match introuvable"
             p["current_score"] = None
 
-    # 9. Statistiques
+    # 8. Statistiques
     joint = 1.0
     for p in selected:
         joint *= p["proba"]
