@@ -1812,6 +1812,7 @@ def get_tickets(day: str):
             "error": f"Erreur interne: {str(e)}",
             "date": day,
             "safe":         {"name": "Ticket Safe",         "total_cote": 1.0, "count": 0, "picks": []},
+            "medium":       {"name": "Ticket Medium Short", "total_cote": 1.0, "count": 0, "picks": []},
             "medium_short": {"name": "Ticket Medium Short", "total_cote": 1.0, "count": 0, "picks": []},
             "medium_long":  {"name": "Ticket Medium Long",  "total_cote": 1.0, "count": 0, "picks": []},
             "risky":        {"name": "Ticket Risky",        "total_cote": 1.0, "count": 0, "picks": []},
