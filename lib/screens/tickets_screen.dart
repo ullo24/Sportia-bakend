@@ -116,6 +116,22 @@ class _TicketsScreenState extends State<TicketsScreen> {
     }
   }
 
+ 
+  // 👇👇👇 INSÈRE ICI LE BLOC _safeTicket 👇👇👇
+  Map<String, dynamic> _safeTicket(String key) {
+    final t = _tickets?[key];
+    if (t is Map<String, dynamic>) return t;
+    return {
+      "name": "",
+      "total_cote": 1.0,
+      "count": 0,
+      "joint_prob": 0.0,
+      "joint_prob_pct": 0.0,
+      "picks": [],
+    };
+  }
+  // 👆👆👆 FIN DU BLOC À INSÉRER 👆👆👆
+  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -198,7 +214,7 @@ class _TicketsScreenState extends State<TicketsScreen> {
     );
   }
 
-  // ============ VUE JOUR ============
+    // ============ VUE JOUR ============
   Widget _buildDayView() {
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -207,27 +223,36 @@ class _TicketsScreenState extends State<TicketsScreen> {
             DateFormat('EEEE d MMMM', 'fr').format(DateTime.now())),
         const SizedBox(height: 16),
         _buildTicketCard(
-          data: _tickets!['safe'],
+          data: _safeTicket('safe'),
           title: 'SAFE',
-          subtitle: 'Cote ~2 · 2-3 picks fiables',
+          subtitle: 'Cote ~2.5 · 2-3 picks fiables',
           gradient: [const Color(0xFF2E7D32), const Color(0xFF4CAF50)],
           icon: Icons.verified,
           isPremiumLocked: false,
         ),
         const SizedBox(height: 12),
         _buildTicketCard(
-          data: _tickets!['medium'],
-          title: 'MEDIUM',
-          subtitle: 'Cote ~120 · 12-15 picks',
+          data: _safeTicket('medium_short'),
+          title: 'MEDIUM SHORT',
+          subtitle: 'Cote ~55 · 5-8 picks',
           gradient: [const Color(0xFF1565C0), const Color(0xFF42A5F5)],
           icon: Icons.trending_up,
           isPremiumLocked: !_isPremium,
         ),
         const SizedBox(height: 12),
         _buildTicketCard(
-          data: _tickets!['risky'],
+          data: _safeTicket('medium_long'),
+          title: 'MEDIUM LONG',
+          subtitle: 'Cote ~125 · 7-10 picks',
+          gradient: [const Color(0xFF00838F), const Color(0xFF26C6DA)],
+          icon: Icons.rocket_launch,
+          isPremiumLocked: !_isPremium,
+        ),
+        const SizedBox(height: 12),
+        _buildTicketCard(
+          data: _safeTicket('risky'),
           title: 'RISKY',
-          subtitle: 'Cote élevée · Marchés variés',
+          subtitle: 'Cote ~1000 · Marchés variés',
           gradient: [const Color(0xFFB71C1C), const Color(0xFFFF5722)],
           icon: Icons.local_fire_department,
           isPremiumLocked: !_isPremium,
@@ -238,6 +263,7 @@ class _TicketsScreenState extends State<TicketsScreen> {
     );
   }
 
+  // ============ VUE SEMAINE ============
   // ============ VUE SEMAINE ============
   Widget _buildWeekView() {
     final picks = (_weekTicket!['picks'] as List?) ?? [];
@@ -562,6 +588,18 @@ class _TicketsScreenState extends State<TicketsScreen> {
                       fontWeight: FontWeight.w600,
                       color: gradient.first,
                     )),
+                // 👇👇👇 INSÈRE ICI LE BLOC joint_prob_pct 👇👇👇
+                if ((data['joint_prob_pct'] ?? 0) > 0) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    '· ${(data['joint_prob_pct'] as num).toStringAsFixed(1)}% chance',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      color: gradient.first.withValues(alpha: 0.8),
+                    ),
+                  ),
+                ],
                 const Spacer(),
                 if (isPremiumLocked)
                   Container(
