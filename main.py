@@ -78,6 +78,14 @@ LEAGUE_TOP_N = {
     "PL": 5, "PD": 4, "FL1": 4, "DED": 4, "BL1": 5, "PPL": 4,
     "BSA": 5,
 }
+# Top teams hardcodés pour les ligues sans standings football-data.org
+TOP_TEAMS_HARDCODED = {
+    "SAU": ["Al Hilal", "Al Ittihad", "Al Nassr", "Al Ahli", "Al Shabab"],
+    "JPN": ["Kashima Antlers", "Vissel Kobe", "Urawa Reds", "Yokohama F. Marinos", "Sanfrecce Hiroshima"],
+    "KOR": ["Ulsan HD", "Jeonbuk Motors", "Pohang Steelers", "FC Seoul", "Gangwon FC"],
+    "ARG": ["River Plate", "Boca Juniors", "Racing Club", "Independiente", "Vélez Sársfield"],
+    "MLS": ["Inter Miami", "LAFC", "Columbus Crew", "Philadelphia Union", "Seattle Sounders"],
+}
 
 _STANDINGS_CACHE = {}
 MIGRATE_DB = False
@@ -1513,61 +1521,57 @@ def _calc_risky_pick(m):
         "proba": round(best[2], 3), "cote": round(best[3], 2),
     }
 
-def _build_weekly_ticket(pool, target_cote=500.0, min_n=6, max_n=12):
+def _pick_best_for_match(picks_for_match, min_cote=1.2, max_cote=1.6):
     """
-    Construit un ticket semaine diversifié en visant une cote élevée.
-    - Trie par qualité (confiance privilégiée, cote proche de 1.8)
-    - Sélection gloutonne avec diversité stricte :
-      max 2 par ligue, 2 par marché, 3 par groupe
-    - Continue jusqu'à atteindre target_cote ou max_n
+    Choisit le meilleur pick d'un match dans la plage de cote cible (1.2-1.6).
+    - Priorité : picks dans la plage, triés par confiance décroissante
+    - Fallback : pick avec cote la plus proche de 1.4 si aucun dans la plage
     """
-    if not pool:
+    if not picks_for_match:
+        return None
+
+    # 1. Candidates dans la plage cible
+    candidates = [
+        p for p in picks_for_match
+        if min_cote <= p["cote"] <= max_cote
+    ]
+
+    if candidates:
+        # Prendre le plus haute confiance, puis cote la plus proche de 1.4
+        candidates.sort(
+            key=lambda p: (-p.get("confidence", 0), abs(p["cote"] - 1.4))
+        )
+        return candidates[0]
+
+    # 2. Fallback : le pick le plus proche de 1.4
+    sorted_all = sorted(
+        picks_for_match,
+        key=lambda p: abs(p["cote"] - 1.4)
+    )
+    return sorted_all[0] if sorted_all else None
+
+def _build_weekly_ticket(all_picks):
+    """
+    Construit un ticket semaine avec TOUS les matchs top teams.
+    - 1 pick par match (le meilleur dans la plage 1.2-1.6)
+    - Pas de limite par ligue, ni de nombre de matchs
+    - Fallback si aucun pick dans la plage
+    """
+    if not all_picks:
         return []
 
-    def quality(p):
-        conf = p.get("confidence", 0)
-        cote = p["cote"]
-        cote_distance = abs(cote - 1.80)
-        cote_penalty = cote_distance * 0.15
-        return -(conf - cote_penalty)
+    # Grouper par match_id
+    by_match = {}
+    for p in all_picks:
+        mid = p["match_id"]
+        by_match.setdefault(mid, []).append(p)
 
-    pool_sorted = sorted(pool, key=quality)
-
+    # Prendre le meilleur pick par match
     selected = []
-    used_matches = set()
-    used_leagues = {}
-    used_markets = {}
-    used_groups = {}
-
-    MAX_PER_LEAGUE = 2
-    MAX_PER_MARKET = 2
-    MAX_PER_GROUP = 3
-
-    for p in pool_sorted:
-        if len(selected) >= max_n:
-            break
-        if p["match_id"] in used_matches:
-            continue
-        lg = p.get("league", "")
-        mk = p["market"]
-        gr = p.get("group", "other")
-        if used_leagues.get(lg, 0) >= MAX_PER_LEAGUE:
-            continue
-        if used_markets.get(mk, 0) >= MAX_PER_MARKET:
-            continue
-        if used_groups.get(gr, 0) >= MAX_PER_GROUP:
-            continue
-
-        selected.append(p)
-        used_matches.add(p["match_id"])
-        used_leagues[lg] = used_leagues.get(lg, 0) + 1
-        used_markets[mk] = used_markets.get(mk, 0) + 1
-        used_groups[gr] = used_groups.get(gr, 0) + 1
-
-        if len(selected) >= min_n:
-            cote = _calc_total_cote(selected)
-            if cote >= target_cote:
-                break
+    for mid, picks in by_match.items():
+        best = _pick_best_for_match(picks, min_cote=1.2, max_cote=1.6)
+        if best:
+            selected.append(best)
 
     return selected
 
@@ -1966,23 +1970,26 @@ async def get_live_scores(day: str, refresh: bool = False):
             print("Live " + code + ": " + str(e))
     return all_results
 
-
 @app.get("/tickets-week")
 async def get_tickets_week():
-    """Ticket semaine : top 5 équipes uniquement, picks diversifiés, cote élevée."""
+    """Ticket semaine : TOUS les matchs des top teams, sans limite."""
     today = date.today()
     week_later = (today + timedelta(days=7)).isoformat()
 
-    # 1. Top teams per league
+    # 1. Top teams football-data.org
     top_teams_by_league = {}
     for code, top_n in LEAGUE_TOP_N.items():
         teams = await fetch_top_teams(code, top_n)
         top_teams_by_league[code] = set(teams)
 
+    # 2. Top teams hardcodés pour les nouvelles ligues
+    for code, teams in TOP_TEAMS_HARDCODED.items():
+        top_teams_by_league[code] = set(teams)
+
     if not any(top_teams_by_league.values()):
         return {"error": "Standings indisponibles"}
 
-    # 2. Matches this week
+    # 3. Matchs de la semaine
     conn = db()
     rows = conn.execute(
         "SELECT * FROM matches WHERE date(kickoff) BETWEEN ? AND ? ORDER BY kickoff ASC",
@@ -1993,24 +2000,32 @@ async def get_tickets_week():
     if not rows:
         return {"error": "Aucun match cette semaine"}
 
-    # 3. Filter eligible (top team playing, match scheduled)
+    # 4. Filtrer : match avec au moins une top team
     eligible = []
+    league_name_to_code = {name: c for c, name in COMPETITIONS.items()}
+    league_name_to_code.update({
+        "Saudi Pro League": "SAU",
+        "J1 League": "JPN",
+        "K League 1": "KOR",
+        "Liga Profesional Argentina": "ARG",
+        "Major League Soccer": "MLS",
+    })
+
     for r in rows:
         m = dict(r)
         status = m.get("status", "")
         if status not in ["SCHEDULED", "TIMED"]:
             continue
         league_name = m.get("league", "")
-        code = None
-        for c, name in COMPETITIONS.items():
-            if name == league_name:
-                code = c
-                break
+        code = league_name_to_code.get(league_name)
         if not code or code not in top_teams_by_league:
             continue
         top_teams = top_teams_by_league[code]
-        home_top = m.get("home", "") in top_teams
-        away_top = m.get("away", "") in top_teams
+        home = m.get("home", "")
+        away = m.get("away", "")
+        # Matching souple (substring)
+        home_top = any(t in home or home in t for t in top_teams)
+        away_top = any(t in away or away in t for t in top_teams)
         if not home_top and not away_top:
             continue
         m["_code"] = code
@@ -2021,7 +2036,7 @@ async def get_tickets_week():
     if not eligible:
         return {"error": "Aucun match avec equipe top cette semaine"}
 
-    # 4. Rich pick pool from ALL eligible matches (tous les marchés)
+    # 5. Collecter TOUS les picks des matchs éligibles
     all_picks = []
     for m in eligible:
         try:
@@ -2035,25 +2050,13 @@ async def get_tickets_week():
     if not all_picks:
         return {"error": "Aucun pick trouve"}
 
-    # 5. Filter by confidence (fallback progressif)
-    confident_picks = [p for p in all_picks if p.get("confidence", 0) >= 0.55]
-    if len(confident_picks) < 5:
-        confident_picks = [p for p in all_picks if p.get("confidence", 0) >= 0.45]
-    if len(confident_picks) < 3:
-        confident_picks = all_picks
-
-    # 6. Build diversified ticket
-    selected = _build_weekly_ticket(
-        confident_picks,
-        target_cote=500.0,
-        min_n=6,
-        max_n=12,
-    )
+    # 6. Construire le ticket (1 pick par match, cote 1.2-1.6)
+    selected = _build_weekly_ticket(all_picks)
 
     if not selected:
         return {"error": "Impossible de construire le ticket"}
 
-    # 7. Enrich with evaluation
+    # 7. Enrichir avec évaluation
     match_map = {m["id"]: m for m in eligible}
     for p in selected:
         match = match_map.get(p["match_id"])
@@ -2073,7 +2076,7 @@ async def get_tickets_week():
             p["reason"] = "Match introuvable"
             p["current_score"] = None
 
-    # 8. Stats
+    # 8. Statistiques
     joint = 1.0
     for p in selected:
         joint *= p["proba"]
@@ -2092,7 +2095,7 @@ async def get_tickets_week():
         "total_eligible_matches": len(eligible),
         "total_picks": len(selected),
         "total_cote": _calc_total_cote(selected),
-        "joint_prob_pct": round(joint * 100, 2),
+        "joint_prob_pct": round(joint * 100, 4),
         "picks": selected,
         "markets_used": markets_used,
         "leagues_used": leagues_used,
