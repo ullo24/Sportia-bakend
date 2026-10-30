@@ -2057,7 +2057,7 @@ async def get_tickets_week():
         return {"error": "Aucun pick trouve"}
 
     # 6. Filtrer par confiance (garder les meilleurs picks)
-    best_picks = [p for p in all_picks if p.get("confidence", 0) >= 0.70]
+    best_picks = [p for p in all_picks if p.get("confidence", 0) >= 0.60]
     if len(best_picks) < 10:
         # Fallback progressif si pas assez de picks
         best_picks = [p for p in all_picks if p.get("confidence", 0) >= 0.60]
