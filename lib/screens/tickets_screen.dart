@@ -648,10 +648,21 @@ class _TicketsScreenState extends State<TicketsScreen> {
     );
   }
 
-  Widget _buildPickRow(Map p) {
+    Widget _buildPickRow(Map p) {
     final result = (p['result'] ?? 'pending').toString();
     final reason = (p['reason'] ?? '').toString();
     final currentScore = p['current_score'];
+
+    // 👇 NOUVEAU : Formatage de la date et de l'heure
+    String dateStr = '';
+    if (p['kickoff'] != null) {
+      try {
+        // On parse la date ISO (ex: 2026-10-31T17:30:00Z) et on la convertit en heure locale
+        final dt = DateTime.parse(p['kickoff']).toLocal();
+        // On formate : "31 Oct à 18:30"
+        dateStr = DateFormat("d MMM 'à' HH:mm", 'fr').format(dt);
+      } catch (_) {}
+    }
 
     Color bgColor, borderColor, iconColor;
     IconData icon;
@@ -704,6 +715,26 @@ class _TicketsScreenState extends State<TicketsScreen> {
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis),
+                  // 👇 NOUVEAU : Affichage de l'heure
+                  if (dateStr.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2, bottom: 2),
+                      child: Row(
+                        children: [
+                          Icon(Icons.access_time, size: 10, color: Colors.grey.shade600),
+                          const SizedBox(width: 4),
+                          Text(
+                            dateStr,
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.grey.shade600,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  // 👆 FIN DU NOUVEAU BLOC
                   const SizedBox(height: 2),
                   Row(
                     children: [
