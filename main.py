@@ -1538,7 +1538,10 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
                              max_per_group=3):
     if not pool:
         return []
-    filtered = [p for p in pool if p["proba"] >= min_proba]
+
+    # 👈 1. Assouplissement : Accepter la CL même si proba < min_proba
+    filtered = [p for p in pool if p["proba"] >= min_proba or p.get("league") == "Champions League"]
+    
     if len(filtered) < min_n:
         filtered = sorted(pool, key=lambda p: -p["proba"])[:max(max_n * 3, 15)]
     if len(filtered) < min_n:
@@ -1549,14 +1552,22 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
 
     for n in range(min_n, min(max_n, len(filtered)) + 1):
         ideal_per_pick = target_cote ** (1.0 / n)
+        
+        # 👈 2. Priorisation : Mettre la CL en premier dans le tri
         candidates = sorted(
             filtered,
-            key=lambda p: (abs(p["cote"] - ideal_per_pick), -p["proba"])
+            key=lambda p: (
+                p.get("league") != "Champions League",  # False (0) passe avant True (1)
+                abs(p["cote"] - ideal_per_pick), 
+                -p["proba"]
+            )
         )
+        
         combo = []
         used_matches = set()
         market_count = {}
         group_count = {}
+        
         for p in candidates:
             if len(combo) >= n:
                 break
@@ -1568,12 +1579,15 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
             gr = p.get("group", "other")
             if group_count.get(gr, 0) >= max_per_group:
                 continue
+                
             combo.append(p)
             used_matches.add(p["match_id"])
             market_count[mk] = market_count.get(mk, 0) + 1
             group_count[gr] = group_count.get(gr, 0) + 1
+            
         if len(combo) < min_n:
             continue
+            
         cote = _calc_total_cote(combo)
         diff = abs(cote - target_cote)
         joint = 1.0
@@ -1585,8 +1599,8 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
         if score < best_diff:
             best_diff = score
             best_combo = combo
+            
     return best_combo or []
-
 
 def _summarize_ticket(picks):
     if not picks:
@@ -1973,7 +1987,12 @@ def get_tickets(day: str):
         if not all_picks:
             return {"error": "Aucun pick disponible", "date": day}
 
-        safe_pool = [p for p in all_picks if p.get("confidence", 0) >= 0.70]
+                # 👈 Petite fonction utilitaire pour identifier la CL
+        def is_cl(p):
+            return p.get("league") == "Champions League"
+
+        # === SAFE ===
+        safe_pool = [p for p in all_picks if p.get("confidence", 0) >= 0.70 or is_cl(p)]
         safe = _build_ticket_optimized(
             safe_pool,
             target_cote=2.5,
@@ -1984,10 +2003,11 @@ def get_tickets(day: str):
         )
         safe_ids = {p["match_id"] for p in safe}
 
+        # === MEDIUM SHORT ===
         medium_short_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
-            and p.get("confidence", 0) >= 0.55
+            and (p.get("confidence", 0) >= 0.55 or is_cl(p))
         ]
         medium_short = _build_ticket_optimized(
             medium_short_pool,
@@ -1999,11 +2019,12 @@ def get_tickets(day: str):
         )
         medium_short_ids = {p["match_id"] for p in medium_short}
 
+        # === MEDIUM LONG ===
         medium_long_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
             and p["match_id"] not in medium_short_ids
-            and p.get("confidence", 0) >= 0.50
+            and (p.get("confidence", 0) >= 0.50 or is_cl(p))
         ]
         medium_long = _build_ticket_optimized(
             medium_long_pool,
@@ -2015,12 +2036,13 @@ def get_tickets(day: str):
         )
         medium_long_ids = {p["match_id"] for p in medium_long}
 
+        # === RISKY ===
         risky_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
             and p["match_id"] not in medium_short_ids
             and p["match_id"] not in medium_long_ids
-            and p.get("confidence", 0) >= 0.35
+            and (p.get("confidence", 0) >= 0.35 or is_cl(p))
         ]
         risky = _build_ticket_optimized(
             risky_pool,
@@ -2030,7 +2052,6 @@ def get_tickets(day: str):
             max_per_market=4,
             max_per_group=6,
         )
-
         match_map = {dict(r)["id"]: dict(r) for r in rows}
 
         def enrich(picks):
