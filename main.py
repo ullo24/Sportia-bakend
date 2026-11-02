@@ -343,25 +343,43 @@ def calc_expected_goals_v2e(league_code: str, home_team: str, away_team: str):
         for p in prefixes: n = n.replace(p, "")
         return n.strip().lower()
 
-    def _find(team_name):
-        r = conn.execute("SELECT * FROM team_stats WHERE team=? AND league=?",
-                         (team_name, league_name)).fetchone()
-        if r: return r
+        def _find(team_name):
+        c = conn.cursor()  # 👈 On crée le curseur
+        
+        # 1. Exact match dans la ligue specifique (avec %s)
+        c.execute("SELECT * FROM team_stats WHERE team=%s AND league=%s", (team_name, league_name))
+        r = c.fetchone()
+        if r: 
+            c.close()
+            return r
+            
+        # 2. Si competition europeenne : exact match dans n'importe quelle ligue
         if allow_any_league:
-            r = conn.execute("SELECT * FROM team_stats WHERE team=? LIMIT 1",
-                             (team_name,)).fetchone()
-            if r: return r
+            c.execute("SELECT * FROM team_stats WHERE team=%s LIMIT 1", (team_name,))
+            r = c.fetchone()
+            if r: 
+                c.close()
+                return r
+                
         cleaned = _clean(team_name)
-        for tr in conn.execute("SELECT * FROM team_stats WHERE league=?",
-                               (league_name,)).fetchall():
+        
+        # 3. Prefix match dans la ligue specifique
+        c.execute("SELECT * FROM team_stats WHERE league=%s", (league_name,))
+        for tr in c.fetchall():
             if cleaned in _clean(tr["team"]) or _clean(tr["team"]) in cleaned:
+                c.close()
                 return tr
+                
+        # 4. Prefix match dans n'importe quelle ligue
         if allow_any_league:
-            for tr in conn.execute("SELECT * FROM team_stats").fetchall():
+            c.execute("SELECT * FROM team_stats")
+            for tr in c.fetchall():
                 if cleaned in _clean(tr["team"]) or _clean(tr["team"]) in cleaned:
+                    c.close()
                     return tr
+                    
+        c.close()
         return None
-
     hs = _find(home_team)
     as_ = _find(away_team)
     conn.close()
@@ -1741,42 +1759,75 @@ def matches_week():
     today = date.today()
     week_later = (today + timedelta(days=DAYS_AHEAD)).isoformat()
     conn = db()
-    rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff) BETWEEN ? AND ? ORDER BY kickoff ASC",
+    
+    # 1. Création du curseur
+    c = conn.cursor()
+    
+    # 2. Requête PostgreSQL : SUBSTRING au lieu de date(), et %s au lieu de ?
+    c.execute(
+        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) BETWEEN %s AND %s ORDER BY kickoff ASC",
         (today.isoformat(), week_later),
-    ).fetchall()
+    )
+    
+    # 3. On récupère les résultats depuis le curseur
+    rows = c.fetchall()
+    
+    # 4. On ferme le curseur et la connexion
+    c.close()
     conn.close()
+    
     result = []
     for r in rows:
         m = dict(r)
         m["analysis"] = generate_analysis(m)
         result.append(m)
     return result
-
 
 @app.get("/predictions/{day}/free")
 def get_free_predictions(day: str):
     conn = db()
-    rows = conn.execute(
+    
+    # 👈 1. Créer le curseur
+    c = conn.cursor()
+    
+    # 👈 2. Utiliser c.execute au lieu de conn.execute
+    c.execute(
         "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s AND free_access=1 ORDER BY confidence DESC",
         (day,),
-    ).fetchall()
+    )
+    # 👈 3. Récupérer les résultats depuis le curseur
+    rows = c.fetchall()
+    
+    # 👈 4. Fermer le curseur et la connexion
+    c.close()
     conn.close()
+    
     result = []
     for r in rows:
         m = dict(r)
         m["analysis"] = generate_analysis(m)
         result.append(m)
     return result
-
 
 @app.get("/predictions/{day}/premium")
 def get_premium_predictions(day: str):
     conn = db()
-    rows = conn.execute(
+    
+    # 👈 1. Création du curseur
+    c = conn.cursor()
+    
+    # 👈 2. Utilisation du curseur (c.execute)
+    c.execute(
         "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s ORDER BY confidence DESC", (day,)
-    ).fetchall()
+    )
+    
+    # 👈 3. Récupération des données
+    rows = c.fetchall()
+    
+    # 👈 4. Fermeture
+    c.close()
     conn.close()
+    
     result = []
     for r in rows:
         m = dict(r)
@@ -1784,12 +1835,23 @@ def get_premium_predictions(day: str):
         result.append(m)
     return result
 
-
 @app.get("/matches/{match_id}/detail")
 def match_detail(match_id: int):
     conn = db()
-    row = conn.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+    
+    # 👈 1. Création du curseur
+    c = conn.cursor()
+    
+    # 👈 2. Utilisation du curseur et de %s
+    c.execute("SELECT * FROM matches WHERE id=%s", (match_id,))
+    
+    # 👈 3. Récupération
+    row = c.fetchone()
+    
+    # 👈 4. Fermeture
+    c.close()
     conn.close()
+    
     if not row:
         raise HTTPException(404, "Match introuvable")
     m = dict(row)
@@ -1801,23 +1863,36 @@ def match_detail(match_id: int):
     m["analysis"] = generate_analysis(m)
     return m
 
-
 @app.get("/leagues")
 def get_leagues():
     conn = db()
-    rows = conn.execute("SELECT DISTINCT league FROM matches").fetchall()
+    
+    # 👈 1. Création du curseur
+    c = conn.cursor()
+    
+    # 👈 2. Utilisation du curseur
+    c.execute("SELECT DISTINCT league FROM matches")
+    rows = c.fetchall()
+    
+    # 👈 3. Fermeture
+    c.close()
     conn.close()
+    
     return [r["league"] for r in rows]
-
-
+    
 @app.get("/tickets/{day}")
 def get_tickets(day: str):
     try:
         conn = db()
-        rows = conn.execute(
+        
+        # 👈 CORRECTION ICI : Utilisation du curseur
+        c = conn.cursor()
+        c.execute(
             "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s ORDER BY kickoff ASC",
             (day,),
-        ).fetchall()
+        )
+        rows = c.fetchall()
+        c.close()
         conn.close()
 
         if not rows:
@@ -1941,15 +2016,26 @@ def get_tickets(day: str):
             "risky":        {"name": "Ticket Risky",        "total_cote": 1.0, "count": 0, "picks": []},
         }
 
-
 @app.get("/predictions/won/{day}")
 def get_won_predictions(day: str):
     conn = db()
-    rows = conn.execute(
+    
+    # 👈 1. Création du curseur
+    c = conn.cursor()
+    
+    # 👈 2. Utilisation du curseur (c.execute)
+    c.execute(
         "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s AND status='FINISHED' ORDER BY kickoff ASC",
         (day,),
-    ).fetchall()
+    )
+    
+    # 👈 3. Récupération des données
+    rows = c.fetchall()
+    
+    # 👈 4. Fermeture du curseur et de la connexion
+    c.close()
     conn.close()
+    
     result = []
     total_won = 0
     for r in rows:
@@ -1969,18 +2055,29 @@ def get_won_predictions(day: str):
         "total_won_predictions": total_won, "matches": result,
     }
 
-
 @app.get("/predictions/won-week")
 def get_won_predictions_week():
     today = date.today()
     week_ago = (today - timedelta(days=7)).isoformat()
     conn = db()
-    rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff) BETWEEN ? AND ? "
+    
+    # 👈 1. Création du curseur
+    c = conn.cursor()
+    
+    # 👈 2. Requête PostgreSQL (SUBSTRING + %s)
+    c.execute(
+        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) BETWEEN %s AND %s "
         "AND status='FINISHED' ORDER BY kickoff DESC",
         (week_ago, today.isoformat()),
-    ).fetchall()
+    )
+    
+    # 👈 3. Récupération
+    rows = c.fetchall()
+    
+    # 👈 4. Fermeture
+    c.close()
     conn.close()
+    
     by_day = {}
     total_won = 0
     for r in rows:
@@ -2000,7 +2097,6 @@ def get_won_predictions_week():
         "total_won_predictions": total_won,
         "total_finished": len(rows), "days": by_day,
     }
-
 
 @app.get("/live-scores/{day}")
 async def get_live_scores(day: str, refresh: bool = False):
