@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 
 
 load_dotenv()
@@ -2308,6 +2309,84 @@ async def get_tickets_week():
         "leagues_used": leagues_used,
         "top_teams": {code: list(teams) for code, teams in top_teams_by_league.items()},
     }
+
+@app.post("/admin/import-history")
+async def import_history(background_tasks: BackgroundTasks):
+    """Télécharge l'historique (2024-2025) et l'insère dans PostgreSQL en arrière-plan."""
+    background_tasks.add_task(run_history_import)
+    return {"status": "started", "message": "L'importation tourne en arrière-plan. Vérifie les logs Render."}
+
+async def run_history_import():
+    print("=== DÉBUT DE L'IMPORTATION HISTORIQUE ===")
+    
+    # On va chercher la saison 2024-2025 (ou 2025 si tu préfères)
+    seasons = [2024, 2025] 
+    total_inserted = 0
+
+    for season in seasons:
+        for code, name in COMPETITIONS.items():
+            # On ignore la Ligue des Champions pour l'historique pour gagner du temps
+            if code == "CL":
+                continue
+                
+            print(f"Téléchargement de l'historique : {name} ({season})...")
+            date_from = f"{season}-07-01"
+            date_to = f"{season+1}-06-30"
+            
+            url = BASE_URL + "/competitions/" + code + "/matches"
+            params = {"dateFrom": date_from, "dateTo": date_to, "status": "FINISHED"}
+            
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    r = await client.get(url, headers=HEADERS, params=params)
+                    if r.status_code != 200:
+                        print(f"Erreur {code} : HTTP {r.status_code}")
+                        continue
+                    
+                    matches = r.json().get("matches", [])
+                    print(f"  -> {len(matches)} matchs trouvés.")
+                    
+                    if not matches:
+                        continue
+
+                    conn = db()
+                    c = conn.cursor()
+                    
+                    for m in matches:
+                        try:
+                            home = m["homeTeam"]["name"]
+                            away = m["awayTeam"]["name"]
+                            hg = m["score"]["fullTime"]["home"]
+                            ag = m["score"]["fullTime"]["away"]
+                            
+                            if hg is None or ag is None:
+                                continue
+
+                            # On insère avec le statut FINISHED
+                            c.execute("""
+                                INSERT INTO matches 
+                                (id, league, country, home, away, kickoff, status, home_goals, away_goals, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, 'FINISHED', %s, %s, NOW())
+                                ON CONFLICT (id) DO NOTHING
+                            """, (
+                                m["id"], name, m.get("area", {}).get("name", "International"),
+                                home, away, m["utcDate"], hg, ag
+                            ))
+                            total_inserted += 1
+                        except Exception as e:
+                            pass
+                    
+                    conn.commit()
+                    c.close()
+                    conn.close()
+                    
+            except Exception as e:
+                print(f"Exception {code} : {e}")
+            
+            # Pause pour respecter la limite de 10 requêtes/minute de football-data.org
+            await asyncio.sleep(7)
+
+    print(f"=== IMPORTATION TERMINÉE : {total_inserted} matchs ajoutés en base ===")
 
 @app.post("/refresh")
 async def manual_refresh():
