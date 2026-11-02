@@ -430,7 +430,7 @@ def calc_expected_goals_v2e(league_code: str, home_team: str, away_team: str):
     # 1. Calcul des moyennes pondérées (en utilisant weight_sum)
     # Pour éviter la division par zéro si jamais
     w_home = max(hs["weight_sum"], 0.1)
-    w_away = max(as["weight_sum"], 0.1)
+    w_away = max(as_["weight_sum"], 0.1)
     
     # Attaque domicile de l'équipe A (buts pondérés / poids total)
     att_home = hs["weighted_gf_home"] / w_home if hs["n_home"] > 0 else (hs["weighted_gf"] / w_home)
