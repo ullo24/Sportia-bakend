@@ -329,14 +329,13 @@ def _form_factor(form_str):
     r = (w * 3 + d) / (t * 3) if t * 3 > 0 else 0.5
     return 0.90 + (r * 0.20)
 
-def compute_stats_from_history(team_name: str, n_matches: int = 10) -> dict:
-    """Calcule les vraies stats d'une équipe à partir des matchs terminés dans PostgreSQL."""
+def compute_stats_from_history(team_name: str, n_matches: int = 40) -> dict:
+    """Calcule les vraies stats pondérées par le temps (Time Decay)."""
     conn = db()
     c = conn.cursor()
     
-    # On cherche les n derniers matchs terminés de cette équipe (à domicile ou à l'extérieur)
     c.execute("""
-        SELECT home, away, home_goals, away_goals 
+        SELECT home, away, home_goals, away_goals, kickoff 
         FROM matches 
         WHERE (home = %s OR away = %s) AND status = 'FINISHED' 
         ORDER BY kickoff DESC LIMIT %s
@@ -349,94 +348,113 @@ def compute_stats_from_history(team_name: str, n_matches: int = 10) -> dict:
     if not rows or len(rows) < 3:
         return None
 
+    import math
+    from datetime import datetime
+
     stats = {
         "matches_played": len(rows),
         "points": 0,
-        "goals_for": 0, "goals_against": 0,
-        "goals_for_home": 0, "goals_against_home": 0,
-        "goals_for_away": 0, "goals_against_away": 0,
+        "weight_sum": 0,
+        "weighted_gf": 0, "weighted_ga": 0,
+        "weighted_gf_home": 0, "weighted_ga_home": 0,
+        "weighted_gf_away": 0, "weighted_ga_away": 0,
         "wins": 0, "draws": 0, "losses": 0,
         "form_list": []
     }
 
+    # Demi-vie de 60 jours (un match de 60 jours compte 2x moins qu'un match d'aujourd'hui)
+    HALF_LIFE_DAYS = 60.0
+    decay_rate = math.log(2) / HALF_LIFE_DAYS
+
+    now = datetime.now()
+
     for r in rows:
+        # Calcul du poids en fonction de l'âge du match
+        match_date = datetime.fromisoformat(r["kickoff"].replace("Z", "+00:00")).replace(tzinfo=None)
+        days_ago = (now - match_date).days
+        if days_ago < 0: days_ago = 0
+        
+        weight = math.exp(-decay_rate * days_ago)
+        stats["weight_sum"] += weight
+
         is_home = (r["home"] == team_name)
         team_gf = r["home_goals"] if is_home else r["away_goals"]
         team_ga = r["away_goals"] if is_home else r["home_goals"]
         
-        stats["goals_for"] += team_gf
-        stats["goals_against"] += team_ga
+        # On pondère les buts
+        stats["weighted_gf"] += team_gf * weight
+        stats["weighted_ga"] += team_ga * weight
         
         if is_home:
-            stats["goals_for_home"] += team_gf
-            stats["goals_against_home"] += team_ga
+            stats["weighted_gf_home"] += team_gf * weight
+            stats["weighted_ga_home"] += team_ga * weight
         else:
-            stats["goals_for_away"] += team_gf
-            stats["goals_against_away"] += team_ga
+            stats["weighted_gf_away"] += team_gf * weight
+            stats["weighted_ga_away"] += team_ga * weight
 
-        if team_gf > team_ga:
-            stats["points"] += 3
-            stats["wins"] += 1
-            stats["form_list"].append("W")
-        elif team_gf == team_ga:
-            stats["points"] += 1
-            stats["draws"] += 1
-            stats["form_list"].append("D")
-        else:
-            stats["losses"] += 1
-            stats["form_list"].append("L")
+        # Forme et points (on garde les 5 derniers)
+        if len(stats["form_list"]) < 5:
+            if team_gf > team_ga:
+                stats["form_list"].append("W")
+            elif team_gf == team_ga:
+                stats["form_list"].append("D")
+            else:
+                stats["form_list"].append("L")
+                
+        if team_gf > team_ga: stats["wins"] += 1
+        elif team_gf == team_ga: stats["draws"] += 1
+        else: stats["losses"] += 1
 
-    # On garde les 5 derniers résultats pour la forme (dans l'ordre chronologique)
-    stats["form"] = "".join(stats["form_list"][:5][::-1])
+    stats["form"] = "".join(stats["form_list"][::-1]) # Du plus ancien au plus récent
     
-    # On calcule le nombre de matchs à domicile et à l'extérieur pour les moyennes
+    # Nombre de matchs réels à domicile/extérieur (pour le Shrinkage)
     stats["n_home"] = sum(1 for r in rows if r["home"] == team_name)
     stats["n_away"] = sum(1 for r in rows if r["away"] == team_name)
 
     return stats
 
 def calc_expected_goals_v2e(league_code: str, home_team: str, away_team: str):
-    """v2e : Poisson + Dixon-Coles + shrinkage bayesien (avec vraies stats PostgreSQL)."""
+    """v2e : Poisson + Dixon-Coles + Shrinkage + Time Decay."""
     base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
     
-    # 1. On récupère les vraies stats depuis PostgreSQL
     hs = compute_stats_from_history(home_team)
     as_ = compute_stats_from_history(away_team)
     
-    # 2. Fallback si une équipe n'a pas assez de matchs terminés en base
     if (not hs or not as_ or hs["matches_played"] < 3 or as_["matches_played"] < 3):
         return ((base / 2.0) * _SQRT_HA, (base / 2.0) / _SQRT_HA)
 
-    # 3. Application de la formule (avec les vrais buts Dom/Ext)
     la_h = (base / 2.0) * _SQRT_HA
     la_a = (base / 2.0) / _SQRT_HA
-    
-    # Moyennes réelles (Shrinkage K=10)
     K = 10.0
     
-    # Attaque domicile de l'équipe A vs Défense extérieur de l'équipe B
-    att_home = (hs["goals_for_home"] / max(hs["n_home"], 1)) if hs["n_home"] > 0 else (hs["goals_for"] / hs["matches_played"])
-    def_away = (as_["goals_against_away"] / max(as_["n_away"], 1)) if as_["n_away"] > 0 else (as_["goals_against"] / as_["matches_played"])
+    # 1. Calcul des moyennes pondérées (en utilisant weight_sum)
+    # Pour éviter la division par zéro si jamais
+    w_home = max(hs["weight_sum"], 0.1)
+    w_away = max(as["weight_sum"], 0.1)
     
-    # Attaque extérieur de l'équipe B vs Défense domicile de l'équipe A
-    att_away = (as_["goals_for_away"] / max(as_["n_away"], 1)) if as_["n_away"] > 0 else (as_["goals_for"] / as_["matches_played"])
-    def_home = (hs["goals_against_home"] / max(hs["n_home"], 1)) if hs["n_home"] > 0 else (hs["goals_against"] / hs["matches_played"])
+    # Attaque domicile de l'équipe A (buts pondérés / poids total)
+    att_home = hs["weighted_gf_home"] / w_home if hs["n_home"] > 0 else (hs["weighted_gf"] / w_home)
+    def_away = as_["weighted_ga_away"] / w_away if as_["n_away"] > 0 else (as_["weighted_ga"] / w_away)
     
-    # Shrinkage
+    # Attaque extérieur de l'équipe B
+    att_away = as_["weighted_gf_away"] / w_away if as_["n_away"] > 0 else (as_["weighted_gf"] / w_away)
+    def_home = hs["weighted_ga_home"] / w_home if hs["n_home"] > 0 else (hs["weighted_ga"] / w_home)
+    
+    # 2. Application du Shrinkage Bayesien
     att_home_shrunk = (att_home * hs["n_home"] + K * la_h) / (hs["n_home"] + K)
     def_away_shrunk = (def_away * as_["n_away"] + K * la_h) / (as_["n_away"] + K)
     att_away_shrunk = (att_away * as_["n_away"] + K * la_a) / (as_["n_away"] + K)
     def_home_shrunk = (def_home * hs["n_home"] + K * la_a) / (hs["n_home"] + K)
 
-    # Calcul des xG finaux
+    # 3. Calcul final
     hx = (att_home_shrunk * def_away_shrunk) / la_h
     ax = (att_away_shrunk * def_home_shrunk) / la_a
     
-    # Forme
+    # 4. Forme
     hx *= _form_factor(hs["form"] or "")
     ax *= _form_factor(as_["form"] or "")
     
-    # Limites
+    # 5. Limites
     hx = max(0.6, min(3.0, round(hx, 2)))
     ax = max(0.6, min(3.0, round(ax, 2)))
     
