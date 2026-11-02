@@ -1016,7 +1016,8 @@ async def daily_pipeline():
         print(str(len(logos)) + " logos recuperes")
 
         # === Insertion en base ===
-        conn = db()
+                conn = db()
+        c = conn.cursor()  # 👈 1. On crée le curseur ici
         inserted = 0
         for m in all_matches:
             try:
@@ -1024,16 +1025,10 @@ async def daily_pipeline():
                 match_id = m["id"]
                 league = COMPETITIONS.get(code, ZAFRONIX_LEAGUES.get(code, "Unknown"))
                 if code in FC_LEAGUES:
-                    league = {
-                        "SAU": "Saudi Pro League",
-                        "JPN": "J1 League",
-                        "KOR": "K League 1",
-                    }.get(code, code)
+                    league = {"SAU": "Saudi Pro League", "JPN": "J1 League", "KOR": "K League 1"}.get(code, code)
                 if code in GOAL_API_LEAGUES:
-                    league = {
-                        "ARG": "Liga Profesional Argentina",
-                        "CHN": "Chinese Super League",
-                    }.get(code, code)
+                    league = {"ARG": "Liga Profesional Argentina", "CHN": "Chinese Super League"}.get(code, code)
+                
                 country = m.get("area", {}).get("name", "International")
                 home = m["homeTeam"]["name"] or m["homeTeam"].get("shortName", "?")
                 away = m["awayTeam"]["name"] or m["awayTeam"].get("shortName", "?")
@@ -1051,19 +1046,24 @@ async def daily_pipeline():
                     pred["home_win"], pred["draw"], pred["away_win"]
                 )
 
-                c.execute("""
-                    INSERT INTO matches 
+                # 👈 2. On utilise c.execute et la syntaxe PostgreSQL
+                c.execute(
+                    """
+                    INSERT INTO matches
                     (id, league, country, home, away, home_logo, away_logo,
-                     kickoff, status, home_goals, away_goals, ht_home_goals, ht_away_goals,
+                     kickoff, status, home_goals, away_goals,
+                     ht_home_goals, ht_away_goals,
                      home_win, draw, away_win, over_15, under_15, over_25, under_25,
                      over_35, under_35, over_45, under_45, btts_yes, btts_no,
                      first_half_goal, handicap_home_1, handicap_away_1,
                      dc_1x, dc_12, dc_x2, dnb_home, dnb_away,
                      over_05, under_05, btts_over_25, btts_under_35,
-                     handicap_home_minus1, handicap_away_minus1, handicap_home_plus1, handicap_away_plus1,
-                     handicap_home_minus2, handicap_away_minus2, first_half_over_15,
-                     exact_scores, home_scores, away_scores, home_xg, away_xg, total_xg,
-                     confidence, updated_at)
+                     handicap_home_minus1, handicap_away_minus1,
+                     handicap_home_plus1, handicap_away_plus1,
+                     handicap_home_minus2, handicap_away_minus2,
+                     first_half_over_15,
+                     exact_scores, home_scores, away_scores,
+                     home_xg, away_xg, total_xg, confidence, updated_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -1075,7 +1075,7 @@ async def daily_pipeline():
                         home_goals = EXCLUDED.home_goals, away_goals = EXCLUDED.away_goals,
                         home_win = EXCLUDED.home_win, draw = EXCLUDED.draw, away_win = EXCLUDED.away_win,
                         confidence = EXCLUDED.confidence, updated_at = EXCLUDED.updated_at
-                """,
+                    """,
                     (
                         match_id, league, country, home, away,
                         logos.get(home, ""), logos.get(away, ""),
@@ -1108,7 +1108,8 @@ async def daily_pipeline():
                 print("Erreur match " + str(m.get("id")) + ": " + str(e))
 
         conn.commit()
-        conn.close()
+        c.close()       # 👈 3. On ferme le curseur
+        conn.close()    # 👈 4. On ferme la connexion
         print(str(inserted) + " matchs enregistres")
         mark_free_access()
     finally:
