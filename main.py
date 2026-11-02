@@ -1713,7 +1713,7 @@ def matches_week():
 def get_free_predictions(day: str):
     conn = db()
     rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff)=? AND free_access=1 ORDER BY confidence DESC",
+        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s AND free_access=1 ORDER BY confidence DESC",
         (day,),
     ).fetchall()
     conn.close()
@@ -1729,7 +1729,7 @@ def get_free_predictions(day: str):
 def get_premium_predictions(day: str):
     conn = db()
     rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY confidence DESC", (day,)
+        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s ORDER BY confidence DESC", (day,)
     ).fetchall()
     conn.close()
     result = []
@@ -1901,7 +1901,7 @@ def get_tickets(day: str):
 def get_won_predictions(day: str):
     conn = db()
     rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff)=? AND status='FINISHED' ORDER BY kickoff ASC",
+        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s AND status='FINISHED' ORDER BY kickoff ASC",
         (day,),
     ).fetchall()
     conn.close()
