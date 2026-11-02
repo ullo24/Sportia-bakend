@@ -1016,7 +1016,7 @@ async def daily_pipeline():
         print(str(len(logos)) + " logos recuperes")
 
         # === Insertion en base ===
-                conn = db()
+        conn = db()
         c = conn.cursor()  # 👈 1. On crée le curseur ici
         inserted = 0
         for m in all_matches:
