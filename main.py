@@ -5,6 +5,7 @@ import psycopg2
 import psycopg2.extras
 import asyncio
 import httpx
+import hashlib
 from datetime import date, datetime, timedelta
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -776,7 +777,9 @@ def convert_goal_api_to_internal(fixtures: list, league_code: str, league_name: 
                 status = "FINISHED"
             else:
                 status = "SCHEDULED"
-            slug = f.get("id") or f"{league_code}-{home}-{away}-{kickoff[:10]}"
+            hash_obj = hashlib.md5(str(slug).encode())
+            numeric_hash = int(hash_obj.hexdigest(), 16) % (10**10)
+            match_id = 3_000_000_000 + numeric_hash
             match_id = abs(hash(slug)) % (10**12) + 3_000_000_000
             internal_match = {
                 "id": match_id,
