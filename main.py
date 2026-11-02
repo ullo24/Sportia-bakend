@@ -328,82 +328,124 @@ def _form_factor(form_str):
     r = (w * 3 + d) / (t * 3) if t * 3 > 0 else 0.5
     return 0.90 + (r * 0.20)
 
+def compute_stats_from_history(team_name: str, n_matches: int = 10) -> dict:
+    """Calcule les vraies stats d'une équipe à partir des matchs terminés dans PostgreSQL."""
+    conn = db()
+    c = conn.cursor()
+    
+    # On cherche les n derniers matchs terminés de cette équipe (à domicile ou à l'extérieur)
+    c.execute("""
+        SELECT home, away, home_goals, away_goals 
+        FROM matches 
+        WHERE (home = %s OR away = %s) AND status = 'FINISHED' 
+        ORDER BY kickoff DESC LIMIT %s
+    """, (team_name, team_name, n_matches))
+    
+    rows = c.fetchall()
+    c.close()
+    conn.close()
+
+    if not rows or len(rows) < 3:
+        return None
+
+    stats = {
+        "matches_played": len(rows),
+        "points": 0,
+        "goals_for": 0, "goals_against": 0,
+        "goals_for_home": 0, "goals_against_home": 0,
+        "goals_for_away": 0, "goals_against_away": 0,
+        "wins": 0, "draws": 0, "losses": 0,
+        "form_list": []
+    }
+
+    for r in rows:
+        is_home = (r["home"] == team_name)
+        team_gf = r["home_goals"] if is_home else r["away_goals"]
+        team_ga = r["away_goals"] if is_home else r["home_goals"]
+        
+        stats["goals_for"] += team_gf
+        stats["goals_against"] += team_ga
+        
+        if is_home:
+            stats["goals_for_home"] += team_gf
+            stats["goals_against_home"] += team_ga
+        else:
+            stats["goals_for_away"] += team_gf
+            stats["goals_against_away"] += team_ga
+
+        if team_gf > team_ga:
+            stats["points"] += 3
+            stats["wins"] += 1
+            stats["form_list"].append("W")
+        elif team_gf == team_ga:
+            stats["points"] += 1
+            stats["draws"] += 1
+            stats["form_list"].append("D")
+        else:
+            stats["losses"] += 1
+            stats["form_list"].append("L")
+
+    # On garde les 5 derniers résultats pour la forme (dans l'ordre chronologique)
+    stats["form"] = "".join(stats["form_list"][:5][::-1])
+    
+    # On calcule le nombre de matchs à domicile et à l'extérieur pour les moyennes
+    stats["n_home"] = sum(1 for r in rows if r["home"] == team_name)
+    stats["n_away"] = sum(1 for r in rows if r["away"] == team_name)
+
+    return stats
 
 def calc_expected_goals_v2e(league_code: str, home_team: str, away_team: str):
+    """v2e : Poisson + Dixon-Coles + shrinkage bayesien (avec vraies stats PostgreSQL)."""
     base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
-    conn = db()
-    league_name = COMPETITIONS.get(league_code, ZAFRONIX_LEAGUES.get(league_code, ""))
-    allow_any_league = league_code in [
-        "CL", "EL", "UECL", "EC", "WC",
-        "SAU", "JPN", "KOR", "ARG", "CHN", "MLS",
-    ]
-    prefixes = _TEAM_NAME_PREFIXES
-
-    def _clean(n):
-        for p in prefixes: n = n.replace(p, "")
-        return n.strip().lower()
-
-    def _find(team_name):
-        c = conn.cursor()  # 👈 On crée le curseur
-        
-        # 1. Exact match dans la ligue specifique (avec %s)
-        c.execute("SELECT * FROM team_stats WHERE team=%s AND league=%s", (team_name, league_name))
-        r = c.fetchone()
-        if r: 
-            c.close()
-            return r
-            
-        # 2. Si competition europeenne : exact match dans n'importe quelle ligue
-        if allow_any_league:
-            c.execute("SELECT * FROM team_stats WHERE team=%s LIMIT 1", (team_name,))
-            r = c.fetchone()
-            if r: 
-                c.close()
-                return r
-                
-        cleaned = _clean(team_name)
-        
-        # 3. Prefix match dans la ligue specifique
-        c.execute("SELECT * FROM team_stats WHERE league=%s", (league_name,))
-        for tr in c.fetchall():
-            if cleaned in _clean(tr["team"]) or _clean(tr["team"]) in cleaned:
-                c.close()
-                return tr
-                
-        # 4. Prefix match dans n'importe quelle ligue
-        if allow_any_league:
-            c.execute("SELECT * FROM team_stats")
-            for tr in c.fetchall():
-                if cleaned in _clean(tr["team"]) or _clean(tr["team"]) in cleaned:
-                    c.close()
-                    return tr
-                    
-        c.close()
-        return None
-    hs = _find(home_team)
-    as_ = _find(away_team)
-    conn.close()
-    if (not hs or not as_ or hs["matches_played"] < 3
-            or as_["matches_played"] < 3):
+    
+    # 1. On récupère les vraies stats depuis PostgreSQL
+    hs = compute_stats_from_history(home_team)
+    as_ = compute_stats_from_history(away_team)
+    
+    # 2. Fallback si une équipe n'a pas assez de matchs terminés en base
+    if (not hs or not as_ or hs["matches_played"] < 3 or as_["matches_played"] < 3):
         return ((base / 2.0) * _SQRT_HA, (base / 2.0) / _SQRT_HA)
+
+    # 3. Application de la formule (avec les vrais buts Dom/Ext)
     la_h = (base / 2.0) * _SQRT_HA
     la_a = (base / 2.0) / _SQRT_HA
-    ah = (hs["goals_for"] + K_SHRINK * la_h) / (hs["matches_played"] + K_SHRINK)
-    dh = (hs["goals_against"] + K_SHRINK * la_a) / (hs["matches_played"] + K_SHRINK)
-    aa = (as_["goals_for"] + K_SHRINK * la_a) / (as_["matches_played"] + K_SHRINK)
-    da = (as_["goals_against"] + K_SHRINK * la_h) / (as_["matches_played"] + K_SHRINK)
-    hx = ah * da / la_h
-    ax = aa * dh / la_a
+    
+    # Moyennes réelles (Shrinkage K=10)
+    K = 10.0
+    
+    # Attaque domicile de l'équipe A vs Défense extérieur de l'équipe B
+    att_home = (hs["goals_for_home"] / max(hs["n_home"], 1)) if hs["n_home"] > 0 else (hs["goals_for"] / hs["matches_played"])
+    def_away = (as_["goals_against_away"] / max(as_["n_away"], 1)) if as_["n_away"] > 0 else (as_["goals_against"] / as_["matches_played"])
+    
+    # Attaque extérieur de l'équipe B vs Défense domicile de l'équipe A
+    att_away = (as_["goals_for_away"] / max(as_["n_away"], 1)) if as_["n_away"] > 0 else (as_["goals_for"] / as_["matches_played"])
+    def_home = (hs["goals_against_home"] / max(hs["n_home"], 1)) if hs["n_home"] > 0 else (hs["goals_against"] / hs["matches_played"])
+    
+    # Shrinkage
+    att_home_shrunk = (att_home * hs["n_home"] + K * la_h) / (hs["n_home"] + K)
+    def_away_shrunk = (def_away * as_["n_away"] + K * la_h) / (as_["n_away"] + K)
+    att_away_shrunk = (att_away * as_["n_away"] + K * la_a) / (as_["n_away"] + K)
+    def_home_shrunk = (def_home * hs["n_home"] + K * la_a) / (hs["n_home"] + K)
+
+    # Calcul des xG finaux
+    hx = (att_home_shrunk * def_away_shrunk) / la_h
+    ax = (att_away_shrunk * def_home_shrunk) / la_a
+    
+    # Forme
     hx *= _form_factor(hs["form"] or "")
     ax *= _form_factor(as_["form"] or "")
+    
+    # Limites
     hx = max(0.6, min(3.0, round(hx, 2)))
     ax = max(0.6, min(3.0, round(ax, 2)))
+    
     tot = hx + ax
     if tot > 4.5:
         r = 4.5 / tot
-        hx = round(hx * r, 2); ax = round(ax * r, 2)
+        hx = round(hx * r, 2)
+        ax = round(ax * r, 2)
+        
     return hx, ax
-
 
 def predict_all_markets(home_xg: float, away_xg: float) -> dict:
     MAX_GOALS = 10
