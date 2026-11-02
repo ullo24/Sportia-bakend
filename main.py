@@ -2423,23 +2423,3 @@ async def manual_refresh():
 async def manual_refresh():
     await daily_pipeline()
     return {"status": "refreshed", "days_ahead": DAYS_AHEAD}
-
-# 👇👇👇 AJOUTE CE BLOC JUSTE EN DESSOUS 👇👇👇
-@app.post("/admin/clean-argentina")
-async def clean_argentina():
-    """Route temporaire pour nettoyer les doublons argentins."""
-    try:
-        conn = db()
-        c = conn.cursor()
-        # On supprime tous les matchs de la ligue argentine
-        c.execute("DELETE FROM matches WHERE league = 'Liga Profesional Argentina'")
-        deleted = c.rowcount
-        conn.commit()
-        c.close()
-        conn.close()
-        return {"status": "success", "message": f"{deleted} matchs argentins supprimés."}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-# 👆👆👆 FIN DU BLOC À AJOUTER 👆👆👆
-
-
