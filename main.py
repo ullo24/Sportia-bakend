@@ -2210,10 +2210,13 @@ async def get_tickets_week():
 
     # 3. Matchs de la semaine
     conn = db()
-    rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff) BETWEEN ? AND ? ORDER BY kickoff ASC",
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) BETWEEN %s AND %s ORDER BY kickoff ASC",
         (today.isoformat(), week_later),
-    ).fetchall()
+    )
+    rows = c.fetchall()
+    c.close()
     conn.close()
 
     if not rows:
