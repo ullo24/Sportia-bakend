@@ -259,38 +259,51 @@ async def get_team_logo(team_data: dict, force_lookup: bool = False) -> str:
     if not team_name:
         return ""
 
+    # 1. Vérifier dans la base (avec curseur)
     conn = db()
-    row = conn.execute("SELECT logo FROM team_logos WHERE team=?", (team_name,)).fetchone()
+    c = conn.cursor()
+    c.execute("SELECT logo FROM team_logos WHERE team=%s", (team_name,))
+    row = c.fetchone()
+    c.close()
     conn.close()
+    
     if row and row["logo"]:
         return row["logo"]
 
+    # 2. Utiliser le crest de l'API si disponible
     crest = team_data.get("crest")
     if crest and not force_lookup:
         if not crest.endswith('.svg'):
             crest = crest.rsplit('.', 1)[0] + '.svg'
+        
         conn = db()
-        conn.execute(
-            "INSERT OR REPLACE INTO team_logos (team, logo) VALUES (?, ?)",
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO team_logos (team, logo) VALUES (%s, %s) "
+            "ON CONFLICT (team) DO UPDATE SET logo = EXCLUDED.logo",
             (team_name, crest),
         )
         conn.commit()
+        c.close()
         conn.close()
         return crest
 
+    # 3. Chercher via TheSportsDB
     logo = await _lookup_logo_thesportsdb(team_name)
     if logo:
         conn = db()
-        conn.execute(
-            "INSERT OR REPLACE INTO team_logos (team, logo) VALUES (?, ?)",
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO team_logos (team, logo) VALUES (%s, %s) "
+            "ON CONFLICT (team) DO UPDATE SET logo = EXCLUDED.logo",
             (team_name, logo),
         )
         conn.commit()
+        c.close()
         conn.close()
         return logo
 
     return ""
-
 
 # ===== MODELE POISSON =====
 
@@ -1106,14 +1119,16 @@ async def daily_pipeline():
 def mark_free_access():
     today = date.today().isoformat()
     conn = db()
-    conn.execute("UPDATE matches SET free_access = 0 WHERE SUBSTRING(kickoff, 1, 10) = %s", (today,))
-    conn.execute(
+    c = conn.cursor()
+    c.execute("UPDATE matches SET free_access = 0 WHERE SUBSTRING(kickoff, 1, 10) = %s", (today,))
+    c.execute(
         "UPDATE matches SET free_access = 1 WHERE id IN ("
-        "SELECT id FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s"
-        "AND confidence IS NOT NULL ORDER BY confidence DESC LIMIT ?)",
+        "SELECT id FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s "
+        "AND confidence IS NOT NULL ORDER BY confidence DESC LIMIT %s)",
         (today, FREE_MATCHES_PER_DAY),
     )
     conn.commit()
+    c.close()
     conn.close()
     print("Top " + str(FREE_MATCHES_PER_DAY) + " matchs marques comme gratuits")
 
@@ -1155,11 +1170,15 @@ async def fetch_top_teams(code: str, top_n: int):
 
 
 async def fetch_team_stats(code: str, league_name: str):
+    # 1. Vérification du cache (avec curseur)
     conn = db()
-    row = conn.execute(
-        "SELECT COUNT(*) as c, MAX(cached_at) as last FROM team_stats WHERE league=?",
+    c = conn.cursor()
+    c.execute(
+        "SELECT COUNT(*) as c, MAX(cached_at) as last FROM team_stats WHERE league=%s",
         (league_name,),
-    ).fetchone()
+    )
+    row = c.fetchone()
+    c.close()
     conn.close()
 
     if row and row["c"] > 0 and row["last"]:
@@ -1171,6 +1190,7 @@ async def fetch_team_stats(code: str, league_name: str):
         except Exception:
             pass
 
+    # 2. Appel API
     url = BASE_URL + "/competitions/" + code + "/standings"
     try:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -1184,19 +1204,39 @@ async def fetch_team_stats(code: str, league_name: str):
             for s in standings:
                 if s.get("type") != "TOTAL":
                     continue
+                
                 table = s.get("table", [])
                 conn = db()
+                c = conn.cursor()
                 now = datetime.now().isoformat()
+                
+                # 3. Insertion/Mise à jour dans la base
                 for row_team in table:
                     team_name = row_team.get("team", {}).get("name", "")
                     if not team_name:
                         continue
-                    conn.execute("""
-                        INSERT OR REPLACE INTO team_stats
+                    
+                    # La requête PostgreSQL avec ON CONFLICT pour remplacer INSERT OR REPLACE
+                    c.execute("""
+                        INSERT INTO team_stats
                         (team, league, matches_played, wins, draws, losses,
                          goals_for, goals_against, goals_for_home, goals_against_home,
                          goals_for_away, goals_against_away, points, form, cached_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (team, league) DO UPDATE SET
+                            matches_played = EXCLUDED.matches_played,
+                            wins = EXCLUDED.wins,
+                            draws = EXCLUDED.draws,
+                            losses = EXCLUDED.losses,
+                            goals_for = EXCLUDED.goals_for,
+                            goals_against = EXCLUDED.goals_against,
+                            goals_for_home = EXCLUDED.goals_for_home,
+                            goals_against_home = EXCLUDED.goals_against_home,
+                            goals_for_away = EXCLUDED.goals_for_away,
+                            goals_against_away = EXCLUDED.goals_against_away,
+                            points = EXCLUDED.points,
+                            form = EXCLUDED.form,
+                            cached_at = EXCLUDED.cached_at
                     """, (
                         team_name, league_name,
                         row_team.get("playedGames", 0),
@@ -1213,13 +1253,14 @@ async def fetch_team_stats(code: str, league_name: str):
                         row_team.get("form", "") or "",
                         now,
                     ))
+                
                 conn.commit()
+                c.close()
                 conn.close()
                 print(f"Stats {league_name} : {len(table)} equipes mises a jour")
                 return
     except Exception as e:
         print(f"Exception standings {code} : {e}")
-
 
 # ===== EVALUATION DES PICKS =====
 
@@ -1679,9 +1720,12 @@ def quota():
 @app.get("/matches/{day}")
 def get_matches(day: str):
     conn = db()
-    rows = conn.execute(
+    c = conn.cursor()
+    c.execute(
         "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s ORDER BY kickoff ASC", (day,)
-    ).fetchall()
+    )
+    rows = c.fetchall()
+    c.close()
     conn.close()
     result = []
     for r in rows:
