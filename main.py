@@ -343,7 +343,7 @@ def calc_expected_goals_v2e(league_code: str, home_team: str, away_team: str):
         for p in prefixes: n = n.replace(p, "")
         return n.strip().lower()
 
-        def _find(team_name):
+    def _find(team_name):
         c = conn.cursor()  # 👈 On crée le curseur
         
         # 1. Exact match dans la ligue specifique (avec %s)
