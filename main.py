@@ -760,16 +760,22 @@ async def fetch_goal_api_fixtures(league_id: str, date_from: str, date_to: str):
 
 
 def convert_goal_api_to_internal(fixtures: list, league_code: str, league_name: str) -> list:
+    """Convertit le format GOAL API vers le format interne."""
+    import hashlib  # 👈 On s'assure que hashlib est importé ici
+    
     converted = []
     for f in fixtures:
         try:
             home = f.get("homeTeamName") or f.get("homeTeam", {}).get("name") or "?"
             away = f.get("awayTeamName") or f.get("awayTeam", {}).get("name") or "?"
             kickoff = f.get("kickoffUtc") or f.get("matchDate")
+            
             if not kickoff:
                 continue
+                
             if isinstance(kickoff, str) and "T" not in kickoff:
                 kickoff = kickoff + "T00:00:00"
+                
             status_raw = (f.get("matchStatus") or "SCHEDULED").upper()
             if status_raw in ["LIVE", "IN_PLAY", "1H", "2H", "HT"]:
                 status = "IN_PLAY"
@@ -777,10 +783,15 @@ def convert_goal_api_to_internal(fixtures: list, league_code: str, league_name: 
                 status = "FINISHED"
             else:
                 status = "SCHEDULED"
+                
+            # 👈 LA LIGNE QUI MANQUAIT EST ICI :
+            slug = f.get("id") or f"{league_code}-{home}-{away}-{kickoff[:10]}"
+            
+            # Le hachage déterministe pour éviter les doublons à chaque redémarrage
             hash_obj = hashlib.md5(str(slug).encode())
             numeric_hash = int(hash_obj.hexdigest(), 16) % (10**10)
             match_id = 3_000_000_000 + numeric_hash
-            match_id = abs(hash(slug)) % (10**12) + 3_000_000_000
+            
             internal_match = {
                 "id": match_id,
                 "homeTeam": {"name": home, "crest": None},
@@ -799,8 +810,8 @@ def convert_goal_api_to_internal(fixtures: list, league_code: str, league_name: 
             converted.append(internal_match)
         except Exception as e:
             print(f"Erreur conversion GOAL API {f.get('id')}: {e}")
+            
     return converted
-
 
 # ===== PIPELINE =====
 
