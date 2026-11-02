@@ -1,7 +1,8 @@
 import os
 import math
 import json
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import asyncio
 import httpx
 from datetime import date, datetime, timedelta
@@ -37,7 +38,14 @@ GOAL_API_LEAGUES = {
 
 BASE_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": API_KEY or ""}
-DB_PATH = "/tmp/sportia.db"
+# Configuration de la base de données
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    print("⚠️ ATTENTION : DATABASE_URL n'est pas définie. La base va planter.")
+
+# Plus besoin de DB_PATH = "/tmp/sportia.db"
+
+#DB_PATH = "/tmp/sportia.db"
 _PIPELINE_RUNNING = False
 
 # Zafronix
@@ -116,94 +124,94 @@ app.add_middleware(
 # ===== BASE DE DONNEES =====
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = db()
     c = conn.cursor()
-    if MIGRATE_DB:
-        c.execute("DROP TABLE IF EXISTS matches")
+    
+    # Table matches
     c.execute("""
         CREATE TABLE IF NOT EXISTS matches (
-            id INTEGER PRIMARY KEY,
+            id BIGINT PRIMARY KEY,
             league TEXT, country TEXT,
             home TEXT, away TEXT,
             home_logo TEXT, away_logo TEXT,
             kickoff TEXT, status TEXT,
             home_goals INTEGER, away_goals INTEGER,
             ht_home_goals INTEGER, ht_away_goals INTEGER,
-            home_win REAL, draw REAL, away_win REAL,
-            over_15 REAL, under_15 REAL,
-            over_25 REAL, under_25 REAL,
-            over_35 REAL, under_35 REAL,
-            over_45 REAL, under_45 REAL,
-            btts_yes REAL, btts_no REAL,
-            first_half_goal REAL,
-            handicap_home_1 REAL, handicap_away_1 REAL,
-            dc_1x REAL, dc_12 REAL, dc_x2 REAL,
-            dnb_home REAL, dnb_away REAL,
-            over_05 REAL, under_05 REAL,
-            btts_over_25 REAL, btts_under_35 REAL,
-            handicap_home_minus1 REAL, handicap_away_minus1 REAL,
-            handicap_home_plus1 REAL, handicap_away_plus1 REAL,
-            handicap_home_minus2 REAL, handicap_away_minus2 REAL,
-            first_half_over_15 REAL,
+            home_win DOUBLE PRECISION, draw DOUBLE PRECISION, away_win DOUBLE PRECISION,
+            over_15 DOUBLE PRECISION, under_15 DOUBLE PRECISION,
+            over_25 DOUBLE PRECISION, under_25 DOUBLE PRECISION,
+            over_35 DOUBLE PRECISION, under_35 DOUBLE PRECISION,
+            over_45 DOUBLE PRECISION, under_45 DOUBLE PRECISION,
+            btts_yes DOUBLE PRECISION, btts_no DOUBLE PRECISION,
+            first_half_goal DOUBLE PRECISION,
+            handicap_home_1 DOUBLE PRECISION, handicap_away_1 DOUBLE PRECISION,
+            dc_1x DOUBLE PRECISION, dc_12 DOUBLE PRECISION, dc_x2 DOUBLE PRECISION,
+            dnb_home DOUBLE PRECISION, dnb_away DOUBLE PRECISION,
+            over_05 DOUBLE PRECISION, under_05 DOUBLE PRECISION,
+            btts_over_25 DOUBLE PRECISION, btts_under_35 DOUBLE PRECISION,
+            handicap_home_minus1 DOUBLE PRECISION, handicap_away_minus1 DOUBLE PRECISION,
+            handicap_home_plus1 DOUBLE PRECISION, handicap_away_plus1 DOUBLE PRECISION,
+            handicap_home_minus2 DOUBLE PRECISION, handicap_away_minus2 DOUBLE PRECISION,
+            first_half_over_15 DOUBLE PRECISION,
             exact_scores TEXT,
-            home_scores REAL, away_scores REAL,
-            home_xg REAL, away_xg REAL, total_xg REAL,
-            confidence REAL,
+            home_scores DOUBLE PRECISION, away_scores DOUBLE PRECISION,
+            home_xg DOUBLE PRECISION, away_xg DOUBLE PRECISION, total_xg DOUBLE PRECISION,
+            confidence DOUBLE PRECISION,
             free_access INTEGER DEFAULT 0,
             updated_at TEXT
         )
     """)
+    
+    # Table api_log
     c.execute("CREATE TABLE IF NOT EXISTS api_log (day TEXT PRIMARY KEY, count INTEGER)")
+    
+    # Table team_logos
     c.execute("CREATE TABLE IF NOT EXISTS team_logos (team TEXT PRIMARY KEY, logo TEXT)")
+    
+    # Table team_stats
     c.execute("""
         CREATE TABLE IF NOT EXISTS team_stats (
             team TEXT,
             league TEXT,
-            matches_played INTEGER,
-            wins INTEGER,
-            draws INTEGER,
-            losses INTEGER,
-            goals_for INTEGER,
-            goals_against INTEGER,
-            goals_for_home INTEGER,
-            goals_against_home INTEGER,
-            goals_for_away INTEGER,
-            goals_against_away INTEGER,
-            points INTEGER,
-            form TEXT,
-            cached_at TEXT,
+            matches_played INTEGER, wins INTEGER, draws INTEGER, losses INTEGER,
+            goals_for INTEGER, goals_against INTEGER,
+            goals_for_home INTEGER, goals_against_home INTEGER,
+            goals_for_away INTEGER, goals_against_away INTEGER,
+            points INTEGER, form TEXT, cached_at TEXT,
             PRIMARY KEY (team, league)
         )
     """)
     conn.commit()
+    c.close()
     conn.close()
 
-
 def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    # On utilise RealDictCursor pour que les résultats se comportent comme des dictionnaires
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
     return conn
-
 
 def increment_count():
     today = date.today().isoformat()
     conn = db()
-    conn.execute(
-        "INSERT INTO api_log (day, count) VALUES (?, 1) "
-        "ON CONFLICT(day) DO UPDATE SET count = count + 1",
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO api_log (day, count) VALUES (%s, 1) "
+        "ON CONFLICT(day) DO UPDATE SET count = api_log.count + 1",
         (today,),
     )
     conn.commit()
+    c.close()
     conn.close()
-
 
 def get_today_count() -> int:
     today = date.today().isoformat()
     conn = db()
-    row = conn.execute("SELECT count FROM api_log WHERE day=?", (today,)).fetchone()
+    c = conn.cursor()
+    c.execute("SELECT count FROM api_log WHERE day=%s", (today,))
+    row = c.fetchone()
+    c.close()
     conn.close()
     return row["count"] if row else 0
-
 
 # ===== LOGOS =====
 
@@ -1030,28 +1038,31 @@ async def daily_pipeline():
                     pred["home_win"], pred["draw"], pred["away_win"]
                 )
 
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO matches
+                c.execute("""
+                    INSERT INTO matches 
                     (id, league, country, home, away, home_logo, away_logo,
-                     kickoff, status, home_goals, away_goals,
-                     ht_home_goals, ht_away_goals,
+                     kickoff, status, home_goals, away_goals, ht_home_goals, ht_away_goals,
                      home_win, draw, away_win, over_15, under_15, over_25, under_25,
                      over_35, under_35, over_45, under_45, btts_yes, btts_no,
                      first_half_goal, handicap_home_1, handicap_away_1,
                      dc_1x, dc_12, dc_x2, dnb_home, dnb_away,
                      over_05, under_05, btts_over_25, btts_under_35,
-                     handicap_home_minus1, handicap_away_minus1,
-                     handicap_home_plus1, handicap_away_plus1,
-                     handicap_home_minus2, handicap_away_minus2,
-                     first_half_over_15,
-                     exact_scores, home_scores, away_scores,
-                     home_xg, away_xg, total_xg, confidence, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+                     handicap_home_minus1, handicap_away_minus1, handicap_home_plus1, handicap_away_plus1,
+                     handicap_home_minus2, handicap_away_minus2, first_half_over_15,
+                     exact_scores, home_scores, away_scores, home_xg, away_xg, total_xg,
+                     confidence, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        league = EXCLUDED.league, country = EXCLUDED.country,
+                        home = EXCLUDED.home, away = EXCLUDED.away,
+                        home_logo = EXCLUDED.home_logo, away_logo = EXCLUDED.away_logo,
+                        kickoff = EXCLUDED.kickoff, status = EXCLUDED.status,
+                        home_goals = EXCLUDED.home_goals, away_goals = EXCLUDED.away_goals,
+                        home_win = EXCLUDED.home_win, draw = EXCLUDED.draw, away_win = EXCLUDED.away_win,
+                        confidence = EXCLUDED.confidence, updated_at = EXCLUDED.updated_at
+                """,
                     (
                         match_id, league, country, home, away,
                         logos.get(home, ""), logos.get(away, ""),
@@ -1095,10 +1106,10 @@ async def daily_pipeline():
 def mark_free_access():
     today = date.today().isoformat()
     conn = db()
-    conn.execute("UPDATE matches SET free_access = 0 WHERE date(kickoff) = ?", (today,))
+    conn.execute("UPDATE matches SET free_access = 0 WHERE SUBSTRING(kickoff, 1, 10) = %s", (today,))
     conn.execute(
         "UPDATE matches SET free_access = 1 WHERE id IN ("
-        "SELECT id FROM matches WHERE date(kickoff) = ? "
+        "SELECT id FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s"
         "AND confidence IS NOT NULL ORDER BY confidence DESC LIMIT ?)",
         (today, FREE_MATCHES_PER_DAY),
     )
@@ -1669,7 +1680,7 @@ def quota():
 def get_matches(day: str):
     conn = db()
     rows = conn.execute(
-        "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC", (day,)
+        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s ORDER BY kickoff ASC", (day,)
     ).fetchall()
     conn.close()
     result = []
@@ -1759,7 +1770,7 @@ def get_tickets(day: str):
     try:
         conn = db()
         rows = conn.execute(
-            "SELECT * FROM matches WHERE date(kickoff)=? ORDER BY kickoff ASC",
+            "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s ORDER BY kickoff ASC",
             (day,),
         ).fetchall()
         conn.close()
