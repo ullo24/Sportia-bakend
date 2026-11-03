@@ -2406,6 +2406,134 @@ async def get_tickets_week():
         "top_teams": {code: list(teams) for code, teams in top_teams_by_league.items()},
     }
 
+@app.get("/tickets-week-value")
+async def get_tickets_week_value():
+    """Ticket semaine 'Value' : 10-15 meilleurs picks, cote cible ~300."""
+    today = date.today()
+    week_later = (today + timedelta(days=7)).isoformat()
+
+    # 1. Récupération des Top Teams (comme pour le ticket complet)
+    top_teams_by_league = {}
+    for code, top_n in LEAGUE_TOP_N.items():
+        teams = await fetch_top_teams(code, top_n)
+        top_teams_by_league[code] = set(teams)
+    for code, teams in TOP_TEAMS_HARDCODED.items():
+        top_teams_by_league[code] = set(teams)
+
+    # 2. Récupération des matchs de la semaine
+    conn = db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) BETWEEN %s AND %s ORDER BY kickoff ASC",
+        (today.isoformat(), week_later),
+    )
+    rows = c.fetchall()
+    c.close()
+    conn.close()
+
+    if not rows:
+        return {"error": "Aucun match cette semaine"}
+
+    # 3. Filtrage des matchs éligibles (Top Teams + Coupes d'Europe)
+    eligible = []
+    league_name_to_code = {name: c for c, name in COMPETITIONS.items()}
+    league_name_to_code.update({
+        "Saudi Pro League": "SAU", "J1 League": "JPN", "K League 1": "KOR",
+        "Liga Profesional Argentina": "ARG", "Major League Soccer": "MLS",
+    })
+
+    for r in rows:
+        m = dict(r)
+        if m.get("status") not in ["SCHEDULED", "TIMED"]:
+            continue
+        league_name = m.get("league", "")
+        
+        if league_name in ["Champions League", "Europa League", "Conference League"]:
+            m["_code"] = league_name
+            eligible.append(m)
+            continue
+            
+        code = league_name_to_code.get(league_name)
+        if not code or code not in top_teams_by_league:
+            continue
+        top_teams = top_teams_by_league[code]
+        home = m.get("home", "")
+        away = m.get("away", "")
+        if not (any(t in home or home in t for t in top_teams) or any(t in away or away in t for t in top_teams)):
+            continue
+            
+        m["_code"] = code
+        eligible.append(m)
+
+    if not eligible:
+        return {"error": "Aucun match avec equipe top cette semaine"}
+
+    # 4. Collecte et dédoublonnage de TOUS les picks possibles
+    all_picks = []
+    seen_picks = set()
+    for m in eligible:
+        try:
+            picks = _all_picks_for_match(m)
+            for p in picks:
+                # Clé unique pour éviter les doublons dus aux redémarrages de l'API
+                key = (p["home"].lower(), p["away"].lower(), p["kickoff"][:10], p["market"])
+                if key not in seen_picks:
+                    seen_picks.add(key)
+                    all_picks.append(p)
+        except Exception as e:
+            print(f"Erreur picks match {m.get('id')}: {e}")
+
+    # 5. Construction du ticket "Value" via la fonction intelligente
+    # On cherche une cote de 300 avec max 15 picks, en privilégiant les probas > 50%
+    value_selected = _build_ticket_optimized(
+        all_picks,
+        target_cote=300.0,
+        min_n=10, max_n=15,
+        min_proba=0.50,
+        max_per_market=3,
+        max_per_group=5
+    )
+
+    # Sécurité : si l'algo n'a pas trouvé assez de picks, on prend les meilleurs dispos
+    if len(value_selected) < 5:
+        all_picks.sort(key=lambda x: -x.get("proba", 0))
+        value_selected = all_picks[:12]
+
+    # 6. Enrichissement et formatage
+    match_map = {m["id"]: m for m in eligible}
+    for p in value_selected:
+        match = match_map.get(p["match_id"])
+        if match:
+            try:
+                ev = _evaluate_pick(p, match)
+                p["result"] = ev["result"]
+                p["reason"] = ev["reason"]
+                p["current_score"] = ev["current_score"]
+                p["match_status"] = match.get("status")
+            except Exception:
+                p["result"] = "pending"
+                p["reason"] = ""
+                p["current_score"] = None
+
+    joint = 1.0
+    for p in value_selected:
+        joint *= p["proba"]
+        
+    markets_used = {}
+    for p in value_selected:
+        mk = p.get("market", "?")
+        markets_used[mk] = markets_used.get(mk, 0) + 1
+
+    return {
+        "week_start": today.isoformat(),
+        "week_end": week_later,
+        "total_picks": len(value_selected),
+        "total_cote": _calc_total_cote(value_selected),
+        "joint_prob_pct": round(joint * 100, 2),
+        "picks": value_selected,
+        "markets_used": markets_used,
+    }
+
 @app.post("/admin/import-history")
 async def import_history(background_tasks: BackgroundTasks):
     """Télécharge l'historique (2024-2025) et l'insère dans PostgreSQL en arrière-plan."""
