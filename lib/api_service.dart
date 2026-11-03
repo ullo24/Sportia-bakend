@@ -164,4 +164,17 @@ class ApiService {
       return {};
     }
   }
+  // Appel du ticket semaine optimisé (Value)
+  static Future<Map<String, dynamic>> getTicketsWeekValue() async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/tickets-week-value'));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {};
+    } catch (e) {
+      return {};
+    }
+  }
+
 }
