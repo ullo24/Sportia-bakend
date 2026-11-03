@@ -1710,18 +1710,20 @@ def _pick_best_for_match(picks_for_match, min_cote=1.2, max_cote=1.6):
     )
     return sorted_all[0] if sorted_all else None
 
-def _build_weekly_ticket(all_picks, max_per_league=3):
+def _build_weekly_ticket(all_picks):
     """
-    Construit un ticket semaine avec dédoublonnage strict par équipes/date
-    et une limite de matchs par ligue pour garantir la diversité.
+    Construit un ticket semaine avec TOUS les matchs éligibles.
+    - 1 seul pick par match (dédoublonné par équipes et date)
+    - Aucune limite par ligue, ni de cote cible.
     """
     if not all_picks:
         return []
 
-    # 1. Dédoublonnage par équipes et date (ignore les match_id instables)
+    # Dédoublonnage strict par équipes et date pour éviter les doublons d'API
     best_per_match = {}
+    
     for p in all_picks:
-        # Clé unique basée sur les noms d'équipes et la date
+        # Clé unique basée sur le nom des équipes et la date (ignore l'ID instable)
         match_key = (
             p["home"].strip().lower(), 
             p["away"].strip().lower(), 
@@ -1735,26 +1737,9 @@ def _build_weekly_ticket(all_picks, max_per_league=3):
             if p.get("proba", 0) > best_per_match[match_key].get("proba", 0):
                 best_per_match[match_key] = p
 
-    unique_matches = list(best_per_match.values())
+    # On retourne TOUS les matchs uniques trouvés
+    return list(best_per_match.values())
 
-    # 2. Sélection avec limite par ligue pour diversifier
-    selected = []
-    league_count = {}
-
-    # On trie globalement par probabilité décroissante pour prendre les meilleurs picks
-    unique_matches.sort(key=lambda x: -x.get("proba", 0))
-
-    for p in unique_matches:
-        lg = p.get("league", "Unknown")
-        
-        # On limite le nombre de matchs par ligue (sauf pour la Champions League)
-        if lg != "Champions League" and league_count.get(lg, 0) >= max_per_league:
-            continue
-            
-        selected.append(p)
-        league_count[lg] = league_count.get(lg, 0) + 1
-
-    return selected
 def _check_won_markets(m):
     if m.get("status") != "FINISHED":
         return []
