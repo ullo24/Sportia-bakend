@@ -167,14 +167,17 @@ class ApiService {
   // Appel du ticket semaine optimisé (Value)
   static Future<Map<String, dynamic>> getTicketsWeekValue() async {
     try {
-      final response = await http.get(Uri.parse('$baseUrl/tickets-week-value'));
-      if (response.statusCode == 200) {
-        return jsonDecode(response.body);
+      // 👈 Utilisation de $API_BASE et ajout du timeout
+      final res = await http
+          .get(Uri.parse('$API_BASE/tickets-week-value'))
+          .timeout(const Duration(seconds: 45));
+          
+      if (res.statusCode == 200) {
+        return jsonDecode(res.body) as Map<String, dynamic>;
       }
       return {};
     } catch (e) {
       return {};
     }
   }
-
 }
