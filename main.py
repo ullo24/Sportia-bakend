@@ -2480,18 +2480,3 @@ async def manual_refresh():
 async def manual_refresh():
     await daily_pipeline()
     return {"status": "refreshed", "days_ahead": DAYS_AHEAD}
-
-
-@app.post("/admin/clean-duplicates")
-async def clean_duplicates():
-    try:
-        conn = db()
-        c = conn.cursor()
-        c.execute("DELETE FROM matches WHERE league IN ('Saudi Pro League', 'J1 League', 'K League 1', 'Chinese Super League')")
-        deleted = c.rowcount
-        conn.commit()
-        c.close()
-        conn.close()
-        return {"status": "success", "message": f"{deleted} doublons supprimés."}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
