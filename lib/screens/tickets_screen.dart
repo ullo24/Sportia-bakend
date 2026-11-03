@@ -20,6 +20,7 @@ class _TicketsScreenState extends State<TicketsScreen> {
   String? _error;
   bool _isPremium = false;
   bool _weekMode = false;
+  bool _showValueWeek = false; // 👈 Nouveau (false = Complet, true = Value)
 
   @override
   void initState() {
@@ -33,26 +34,28 @@ class _TicketsScreenState extends State<TicketsScreen> {
     if (mounted) setState(() => _isPremium = p);
   }
 
-  Future<void> _load() async {
+    Future<void> _load() async {
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
       if (_weekMode) {
-        final data = await ApiService.getTicketsWeek();
+        // On charge les deux tickets en parallèle
+        final results = await Future.wait([
+          ApiService.getTicketsWeek(),
+          ApiService.getTicketsWeekValue(),
+        ]);
+        final completeData = results[0];
+        final valueData = results[1];
+
         if (!mounted) return;
-        if (data.isEmpty || data['error'] != null) {
-          setState(() {
-            _error = data['error'] ?? 'Aucun ticket semaine disponible';
-            _loading = false;
-          });
-        } else {
-          setState(() {
-            _weekTicket = data;
-            _loading = false;
-          });
-        }
+        
+        setState(() {
+          _weekTicket = completeData;
+          _weekValueTicket = valueData;
+          _loading = false;
+        });
       } else {
         final day = DateFormat('yyyy-MM-dd').format(DateTime.now());
         final data = await ApiService.getTickets(day);
@@ -77,7 +80,7 @@ class _TicketsScreenState extends State<TicketsScreen> {
       });
     }
   }
-
+  
   void _toggleMode(bool week) {
     setState(() => _weekMode = week);
     _load();
@@ -264,34 +267,68 @@ class _TicketsScreenState extends State<TicketsScreen> {
   }
 
   // ============ VUE SEMAINE ============
-  // ============ VUE SEMAINE ============
+
+    // ============ VUE SEMAINE ============
   Widget _buildWeekView() {
-    final picks = (_weekTicket!['picks'] as List?) ?? [];
-    final cote = _weekTicket!['total_cote'] ?? 1.0;
-    final count = _weekTicket!['total_picks'] ?? 0;
-    final eligible = _weekTicket!['total_eligible_matches'] ?? 0;
+    // 1. On sélectionne les données en fonction du bouton actif
+    final currentData = _showValueWeek ? _weekValueTicket : _weekTicket;
+
+    if (currentData == null) {
+      return const Center(child: Text("Chargement des tickets..."));
+    }
+
+    final picks = (currentData['picks'] as List?) ?? [];
+    final cote = currentData['total_cote'] ?? 1.0;
+    final count = currentData['total_picks'] ?? 0;
+    final eligible = currentData['total_eligible_matches'] ?? count;
+    final isValue = _showValueWeek;
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        // 👇 NOUVEAU : Le sélecteur Complet / Value 👇
+        Center(
+          child: SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment<bool>(
+                value: false,
+                label: Text('Complet', style: TextStyle(fontSize: 12)),
+                icon: Icon(Icons.list, size: 16),
+              ),
+              ButtonSegment<bool>(
+                value: true,
+                label: Text('Value (Top)', style: TextStyle(fontSize: 12)),
+                icon: Icon(Icons.star, size: 16),
+              ),
+            ],
+            selected: {_showValueWeek},
+            onSelectionChanged: (s) => setState(() => _showValueWeek = s.first),
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // 2. Bannière d'en-tête
         _buildHeaderBanner(
-          'Ticket semaine',
-          'Top équipes · ${_weekTicket!['week_start']} → ${_weekTicket!['week_end']}',
+          isValue ? 'Ticket Value Optimisé' : 'Ticket Semaine Complet',
+          'Top équipes · ${currentData['week_start']} → ${currentData['week_end']}',
         ),
         const SizedBox(height: 12),
-        // Statistiques
+
+        // 3. Statistiques (Changement de couleur : Vert pour Value, Violet pour Complet)
         Container(
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [Color(0xFF6A1B9A), Color(0xFFAB47BC)],
+            gradient: LinearGradient(
+              colors: isValue
+                  ? [const Color(0xFF00897B), const Color(0xFF26A69A)] // Teal
+                  : [const Color(0xFF6A1B9A), const Color(0xFFAB47BC)], // Violet
             ),
             borderRadius: BorderRadius.circular(14),
           ),
           child: Row(
             children: [
               Expanded(
-                child: _statBox('Matchs éligibles', '$eligible'),
+                child: _statBox('Matchs', '$eligible'),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -305,36 +342,39 @@ class _TicketsScreenState extends State<TicketsScreen> {
           ),
         ),
         const SizedBox(height: 16),
-        // Le ticket semaine
+
+        // 4. La carte du ticket
         Card(
           elevation: 4,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           child: Column(
             children: [
+              // En-tête de la carte
               Container(
                 padding: const EdgeInsets.all(18),
-                decoration: const BoxDecoration(
+                decoration: BoxDecoration(
                   gradient: LinearGradient(
-                    colors: [Color(0xFF6A1B9A), Color(0xFFAB47BC)],
+                    colors: isValue
+                        ? [const Color(0xFF00897B), const Color(0xFF26A69A)]
+                        : [const Color(0xFF6A1B9A), const Color(0xFFAB47BC)],
                   ),
-                  borderRadius: BorderRadius.only(
+                  borderRadius: const BorderRadius.only(
                     topLeft: Radius.circular(20),
                     topRight: Radius.circular(20),
                   ),
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.calendar_month,
+                    Icon(isValue ? Icons.stars : Icons.calendar_month,
                         color: Colors.white, size: 32),
                     const SizedBox(width: 10),
-                    const Expanded(
+                    Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'SEMAINE RISKY',
-                            style: TextStyle(
+                            isValue ? 'VALUE PICKS' : 'SEMAINE COMPLET',
+                            style: const TextStyle(
                               color: Colors.white,
                               fontSize: 18,
                               fontWeight: FontWeight.w900,
@@ -342,8 +382,8 @@ class _TicketsScreenState extends State<TicketsScreen> {
                             ),
                           ),
                           Text(
-                            'Top équipes · Picks safe',
-                            style: TextStyle(
+                            isValue ? 'Optimisé pour gagner' : 'Tous les matchs éligibles',
+                            style: const TextStyle(
                               color: Colors.white70,
                               fontSize: 11,
                             ),
@@ -370,10 +410,10 @@ class _TicketsScreenState extends State<TicketsScreen> {
                           ),
                           Text(
                             cote.toStringAsFixed(2),
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 20,
                               fontWeight: FontWeight.w900,
-                              color: Color(0xFF6A1B9A),
+                              color: isValue ? const Color(0xFF00897B) : const Color(0xFF6A1B9A),
                             ),
                           ),
                         ],
@@ -382,21 +422,22 @@ class _TicketsScreenState extends State<TicketsScreen> {
                   ],
                 ),
               ),
+              
+              // Barre de sélections
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                color: const Color(0xFF6A1B9A).withValues(alpha: 0.08),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                color: (isValue ? const Color(0xFF00897B) : const Color(0xFF6A1B9A)).withValues(alpha: 0.08),
                 child: Row(
                   children: [
-                    const Icon(Icons.list_alt,
-                        size: 14, color: Color(0xFF6A1B9A)),
+                    Icon(Icons.list_alt,
+                        size: 14, color: isValue ? const Color(0xFF00897B) : const Color(0xFF6A1B9A)),
                     const SizedBox(width: 6),
                     Text(
                       '$count sélections',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
-                        color: Color(0xFF6A1B9A),
+                        color: isValue ? const Color(0xFF00897B) : const Color(0xFF6A1B9A),
                       ),
                     ),
                     const Spacer(),
@@ -420,6 +461,8 @@ class _TicketsScreenState extends State<TicketsScreen> {
                   ],
                 ),
               ),
+              
+              // Liste des picks
               if (!_isPremium)
                 _buildLockedPicks(count)
               else
@@ -432,7 +475,7 @@ class _TicketsScreenState extends State<TicketsScreen> {
       ],
     );
   }
-
+  
   Widget _statBox(String label, String value) {
     return Container(
       padding: const EdgeInsets.all(10),
