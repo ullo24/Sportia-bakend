@@ -1494,6 +1494,7 @@ def _calc_total_cote(picks):
 
 
 def _all_picks_for_match(m):
+    """Un pick par marché, filtres assouplis pour ne rater aucun match."""
     markets = [
         ("1", m.get("home_win"), m["home"]),
         ("X", m.get("draw"), "Match nul"),
@@ -1525,11 +1526,15 @@ def _all_picks_for_match(m):
     for label, prob, desc in markets:
         if prob is None:
             continue
-        if prob < 0.30 or prob > 0.95:
+        
+        # 👈 LE FILTRE EST MAINTENANT TRÈS LARGE (de 10% à 99%)
+        if prob < 0.10 or prob > 0.99:
             continue
+            
         cote = 1.0 / prob
-        if cote < 1.05 or cote > 3.33:
+        if cote < 1.01 or cote > 5.00:
             continue
+            
         picks.append({
             "match_id": m["id"], "home": m["home"], "away": m["away"],
             "league": m["league"], "kickoff": m["kickoff"],
@@ -1540,7 +1545,6 @@ def _all_picks_for_match(m):
             "confidence": m.get("confidence") or 0.5,
         })
     return picks
-
 
 def _build_ticket_optimized(pool, target_cote, min_n, max_n,
                              min_proba=0.50, max_per_market=2,
