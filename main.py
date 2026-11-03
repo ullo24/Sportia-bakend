@@ -1710,37 +1710,51 @@ def _pick_best_for_match(picks_for_match, min_cote=1.2, max_cote=1.6):
     )
     return sorted_all[0] if sorted_all else None
 
-def _build_weekly_ticket(all_picks, max_per_league=5):
+def _build_weekly_ticket(all_picks, max_per_league=3):
     """
-    Construit un ticket semaine avec TOUS les matchs top teams.
-    - 1 pick par match (le meilleur dans la plage 1.2-1.6)
-    - Limite max_per_league par ligue (défaut 5, pour éviter redondance)
-    - Fallback si aucun pick dans la plage
+    Construit un ticket semaine avec dédoublonnage strict par équipes/date
+    et une limite de matchs par ligue pour garantir la diversité.
     """
     if not all_picks:
         return []
 
-    # Grouper par match_id
-    by_match = {}
+    # 1. Dédoublonnage par équipes et date (ignore les match_id instables)
+    best_per_match = {}
     for p in all_picks:
-        mid = p["match_id"]
-        by_match.setdefault(mid, []).append(p)
+        # Clé unique basée sur les noms d'équipes et la date
+        match_key = (
+            p["home"].strip().lower(), 
+            p["away"].strip().lower(), 
+            p["kickoff"][:10]
+        )
+        
+        if match_key not in best_per_match:
+            best_per_match[match_key] = p
+        else:
+            # Si on a déjà ce match, on garde le pick avec la meilleure probabilité
+            if p.get("proba", 0) > best_per_match[match_key].get("proba", 0):
+                best_per_match[match_key] = p
 
-    # Prendre le meilleur pick par match, limiter par ligue
+    unique_matches = list(best_per_match.values())
+
+    # 2. Sélection avec limite par ligue pour diversifier
     selected = []
     league_count = {}
-    for mid, picks in by_match.items():
-        best = _pick_best_for_match(picks, min_cote=1.2, max_cote=1.6)
-        if not best:
+
+    # On trie globalement par probabilité décroissante pour prendre les meilleurs picks
+    unique_matches.sort(key=lambda x: -x.get("proba", 0))
+
+    for p in unique_matches:
+        lg = p.get("league", "Unknown")
+        
+        # On limite le nombre de matchs par ligue (sauf pour la Champions League)
+        if lg != "Champions League" and league_count.get(lg, 0) >= max_per_league:
             continue
-        lg = best.get("league", "")
-        if league_count.get(lg, 0) >= max_per_league:
-            continue
-        selected.append(best)
+            
+        selected.append(p)
         league_count[lg] = league_count.get(lg, 0) + 1
 
     return selected
-
 def _check_won_markets(m):
     if m.get("status") != "FINISHED":
         return []
