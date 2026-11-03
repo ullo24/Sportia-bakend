@@ -1713,17 +1713,19 @@ def _pick_best_for_match(picks_for_match, min_cote=1.2, max_cote=1.6):
 def _build_weekly_ticket(all_picks):
     """
     Construit un ticket semaine avec TOUS les matchs éligibles.
-    - 1 seul pick par match (dédoublonné par équipes et date)
-    - Aucune limite par ligue, ni de cote cible.
+    - 1 seul pick par match (dédoublonné par équipes et date).
+    - Ignore les paris trop évidents (cote < 1.20) pour garder un vrai esprit "Risky".
     """
     if not all_picks:
         return []
 
-    # Dédoublonnage strict par équipes et date pour éviter les doublons d'API
     best_per_match = {}
     
     for p in all_picks:
-        # Clé unique basée sur le nom des équipes et la date (ignore l'ID instable)
+        # 👈 1. On ignore les marchés où la cote est trop basse (ex: +0.5 buts à 1.05)
+        if p.get("cote", 1.0) < 1.20:
+            continue
+
         match_key = (
             p["home"].strip().lower(), 
             p["away"].strip().lower(), 
@@ -1737,7 +1739,6 @@ def _build_weekly_ticket(all_picks):
             if p.get("proba", 0) > best_per_match[match_key].get("proba", 0):
                 best_per_match[match_key] = p
 
-    # On retourne TOUS les matchs uniques trouvés
     return list(best_per_match.values())
 
 def _check_won_markets(m):
