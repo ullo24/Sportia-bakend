@@ -16,6 +16,7 @@ class TicketsScreen extends StatefulWidget {
 class _TicketsScreenState extends State<TicketsScreen> {
   Map<String, dynamic>? _tickets;
   Map<String, dynamic>? _weekTicket;
+  Map<String, dynamic>? _weekValueTicket; // 👈 AJOUTE CECI
   bool _loading = true;
   String? _error;
   bool _isPremium = false;
