@@ -685,28 +685,27 @@ async def fetch_footballcharts_fixtures(league_key: str, date_from: str, date_to
         return []
 
 def convert_footballcharts_to_internal(fixtures: list, league_code: str, league_name: str) -> list:
-    """Convertit le format Football-Charts (home_team/away_team/match_date)."""
+    import hashlib # 👈 Ajout de l'import
     converted = []
     for f in fixtures:
         try:
-            # ✅ CORRECTION : clés réelles de l'API = home_team / away_team
-            home = f.get("home_team") or f.get("home") or f.get("homeTeam") or "?"
-            away = f.get("away_team") or f.get("away") or f.get("awayTeam") or "?"
-            if isinstance(home, dict):
-                home = home.get("name", "?")
-            if isinstance(away, dict):
-                away = away.get("name", "?")
-            # ✅ CORRECTION : match_date en priorité
-            kickoff = (
-                f.get("match_date") or f.get("kickoff_utc") or f.get("kickoff")
-                or f.get("date") or f.get("datetime") or f.get("start_time")
-            )
-            if not kickoff:
-                continue
+            home = (f.get("home") or f.get("home_team") or f.get("homeTeam") or f.get("home_name") or "?")
+            away = (f.get("away") or f.get("away_team") or f.get("awayTeam") or f.get("away_name") or "?")
+            if isinstance(home, dict): home = home.get("name", "?")
+            if isinstance(away, dict): away = away.get("name", "?")
+                
+            kickoff = (f.get("kickoff_utc") or f.get("kickoff") or f.get("date") or f.get("datetime") or f.get("start_time"))
+            if not kickoff: continue
             if isinstance(kickoff, str) and "T" not in kickoff:
                 kickoff = kickoff + "T00:00:00"
+                
             slug = f.get("slug") or f.get("id") or f"{league_code}-{home}-{away}-{kickoff[:10]}"
-            match_id = abs(hash(slug)) % (10**12) + 2_000_000_000
+            
+            # 👈 REMPLACEMENT DE hash() PAR hashlib.md5
+            hash_obj = hashlib.md5(str(slug).encode())
+            numeric_hash = int(hash_obj.hexdigest(), 16) % (10**10)
+            match_id = 2_000_000_000 + numeric_hash
+            
             internal_match = {
                 "id": match_id,
                 "homeTeam": {"name": home, "crest": None},
@@ -721,7 +720,6 @@ def convert_footballcharts_to_internal(fixtures: list, league_code: str, league_
         except Exception as e:
             print(f"Erreur conversion Football-Charts {f.get('slug')}: {e}")
     return converted
-
 # ===== GOAL API FETCH =====
 
 async def fetch_goal_api_fixtures(league_id: str, date_from: str, date_to: str):
@@ -2482,3 +2480,18 @@ async def manual_refresh():
 async def manual_refresh():
     await daily_pipeline()
     return {"status": "refreshed", "days_ahead": DAYS_AHEAD}
+
+
+@app.post("/admin/clean-duplicates")
+async def clean_duplicates():
+    try:
+        conn = db()
+        c = conn.cursor()
+        c.execute("DELETE FROM matches WHERE league IN ('Saudi Pro League', 'J1 League', 'K League 1', 'Chinese Super League')")
+        deleted = c.rowcount
+        conn.commit()
+        c.close()
+        conn.close()
+        return {"status": "success", "message": f"{deleted} doublons supprimés."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
