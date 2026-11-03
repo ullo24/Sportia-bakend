@@ -1713,34 +1713,61 @@ def _pick_best_for_match(picks_for_match, min_cote=1.2, max_cote=1.6):
 def _build_weekly_ticket(all_picks):
     """
     Construit un ticket semaine avec TOUS les matchs éligibles.
-    - 1 seul pick par match (dédoublonné par équipes et date).
-    - Ignore les paris trop évidents (cote < 1.20) pour garder un vrai esprit "Risky".
+    - 1 seul pick par match (dédoublonné).
+    - Choisit le pari le plus logique en pénalisant les marchés déjà utilisés
+      pour garantir une diversité naturelle.
     """
     if not all_picks:
         return []
 
-    best_per_match = {}
-    
+    # 1. Regrouper les picks par match unique
+    by_match = {}
     for p in all_picks:
-        # 👈 1. On ignore les marchés où la cote est trop basse (ex: +0.5 buts à 1.05)
-        if p.get("cote", 1.0) < 1.20:
-            continue
+        match_key = (p["home"].strip().lower(), p["away"].strip().lower(), p["kickoff"][:10])
+        by_match.setdefault(match_key, []).append(p)
 
-        match_key = (
-            p["home"].strip().lower(), 
-            p["away"].strip().lower(), 
-            p["kickoff"][:10]
-        )
+    selected = []
+    market_counts = {}
+
+    # 2. Parcourir tous les matchs de la semaine
+    for match_key, picks_for_match in by_match.items():
         
-        if match_key not in best_per_match:
-            best_per_match[match_key] = p
-        else:
-            # Si on a déjà ce match, on garde le pick avec la meilleure probabilité
-            if p.get("proba", 0) > best_per_match[match_key].get("proba", 0):
-                best_per_match[match_key] = p
+        best_pick = None
+        best_score = -1.0
 
-    return list(best_per_match.values())
+        for p in picks_for_match:
+            cote = p.get("cote", 1.0)
+            # On ignore les paris évidents à cote < 1.18 (ex: Over 0.5 à 1.05)
+            if cote < 1.18:
+                continue
+                
+            mk = p.get("market", "other")
+            count = market_counts.get(mk, 0)
+            
+            # 3. Score = probabilité - pénalité (3% par utilisation précédente du marché)
+            # Si un marché est très utilisé, son score baisse, laissant la place à d'autres paris
+            score = p.get("proba", 0) - (count * 0.03)
+            
+            if score > best_score:
+                best_score = score
+                best_pick = p
 
+        # 4. Si aucun pick n'a passé le filtre (cote trop basse), on prend le moins risqué
+        if not best_pick:
+            picks_for_match.sort(key=lambda x: -x.get("proba", 0))
+            for p in picks_for_match:
+                if p.get("cote", 1.0) >= 1.10:
+                    best_pick = p
+                    break
+                    
+        # 5. On ajoute le meilleur pick au ticket
+        if best_pick:
+            selected.append(best_pick)
+            mk = best_pick.get("market", "other")
+            market_counts[mk] = market_counts.get(mk, 0) + 1
+
+    return selected
+    
 def _check_won_markets(m):
     if m.get("status") != "FINISHED":
         return []
