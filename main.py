@@ -2299,18 +2299,32 @@ async def get_tickets_week():
         status = m.get("status", "")
         if status not in ["SCHEDULED", "TIMED"]:
             continue
+            
         league_name = m.get("league", "")
+        
+        # 👇 LE BLOC MANQUANT EST ICI 👇
+        # On inclut TOUTES les coupes d'Europe sans condition de Top Teams
+        if league_name in ["Champions League", "Europa League", "Conference League"]:
+            m["_code"] = league_name
+            m["_home_top"] = True
+            m["_away_top"] = True
+            eligible.append(m)
+            continue
+        # 👆 FIN DU BLOC MANQUANT 👆
+
         code = league_name_to_code.get(league_name)
         if not code or code not in top_teams_by_league:
             continue
+            
         top_teams = top_teams_by_league[code]
         home = m.get("home", "")
         away = m.get("away", "")
-        # Matching souple (substring)
         home_top = any(t in home or home in t for t in top_teams)
         away_top = any(t in away or away in t for t in top_teams)
+        
         if not home_top and not away_top:
             continue
+            
         m["_code"] = code
         m["_home_top"] = home_top
         m["_away_top"] = away_top
