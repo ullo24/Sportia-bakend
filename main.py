@@ -1710,42 +1710,52 @@ def _pick_best_for_match(picks_for_match, min_cote=1.2, max_cote=1.6):
 
 def _build_weekly_ticket(all_picks):
     """
-    Construit un ticket semaine avec ABSOLUMENT TOUS les matchs éligibles.
-    - 1 seul pick par match (dédoublonné).
-    - Cherche le meilleur pick avec une cote > 1.18.
-    - Si aucun n'est disponible, prend le pick le plus probable (fallback).
+    Construit un ticket semaine avec TOUS les matchs éligibles.
+    - Prend tous les matchs des Top Teams (aucune limite par ligue).
+    - Pénalise les marchés déjà utilisés pour garantir la diversité.
     """
     if not all_picks:
         return []
 
-    # 1. Grouper les picks par match unique
+    # 1. Regrouper les picks par match unique
     by_match = {}
     for p in all_picks:
         match_key = (p["home"].strip().lower(), p["away"].strip().lower(), p["kickoff"][:10])
         by_match.setdefault(match_key, []).append(p)
 
     selected = []
+    market_counts = {}
 
-    # 2. Parcourir TOUS les matchs éligibles
+    # 2. Parcourir TOUS les matchs
     for match_key, picks_for_match in by_match.items():
         
-        # On trie les picks du match par probabilité décroissante
-        picks_for_match.sort(key=lambda x: -x.get("proba", 0))
-        
         best_pick = None
-        
-        # On cherche d'abord un pick avec une cote correcte (pour éviter de ne faire que du Over 0.5)
+        best_score = -1.0
+
         for p in picks_for_match:
-            if p.get("cote", 1.0) >= 1.18:
-                best_pick = p
-                break
+            cote = p.get("cote", 1.0)
+            if cote < 1.15:  # On évite juste les paris vraiment trop bas (ex: 1.05)
+                continue
                 
-        # 👈 LE FALLBACK : Si tous les picks ont une cote < 1.18, on prend le plus probable
+            mk = p.get("market", "other")
+            count = market_counts.get(mk, 0)
+            
+            # Plus un marché est utilisé, plus son score baisse.
+            # Cela force l'algorithme à choisir un autre marché (ex: BTTS au lieu de -4.5)
+            score = p.get("proba", 0) - (count * 0.05)
+            
+            if score > best_score:
+                best_score = score
+                best_pick = p
+
+        # Si aucun pick n'a passé le filtre de cote, on prend le plus probable
         if not best_pick and picks_for_match:
-            best_pick = picks_for_match[0]
+            best_pick = max(picks_for_match, key=lambda x: x.get("proba", 0))
 
         if best_pick:
             selected.append(best_pick)
+            mk = best_pick.get("market", "other")
+            market_counts[mk] = market_counts.get(mk, 0) + 1
 
     return selected
 
