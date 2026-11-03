@@ -2463,3 +2463,18 @@ async def manual_refresh():
 async def manual_refresh():
     await daily_pipeline()
     return {"status": "refreshed", "days_ahead": DAYS_AHEAD}
+
+@app.post("/admin/clean-upcoming")
+async def clean_upcoming():
+    try:
+        conn = db()
+        c = conn.cursor()
+        # 👈 On supprime UNIQUEMENT les matchs qui ne sont pas encore terminés
+        c.execute("DELETE FROM matches WHERE status IN ('SCHEDULED', 'TIMED', 'IN_PLAY', 'PAUSED')")
+        deleted = c.rowcount
+        conn.commit()
+        c.close()
+        conn.close()
+        return {"status": "success", "message": f"{deleted} matchs à venir ont été supprimés. Les matchs FINISHED sont intacts."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
