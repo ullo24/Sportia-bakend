@@ -120,26 +120,38 @@ class _TicketsScreenState extends State<TicketsScreen> {
     }
   }
   
-  Future<void> _showAiChat(Map pick) async {
+    Future<void> _showAiChat(Map pick) async {
     TextEditingController textController = TextEditingController();
-    
+    bool isLoading = true;
+    Map<String, dynamic>? aiResponse;
+    String currentQuestion = "Pourquoi ce pick a-t-il été choisi ?";
+
     showDialog(
       context: context,
       builder: (context) {
-        bool isLoading = true;
-        Map<String, dynamic>? aiResponse;
-        
         return StatefulBuilder(
           builder: (context, setDialogState) {
             
-            // Appel initial à l'IA
-            if (isLoading) {
-              ApiService.explainPick(pick['match_id'], pick['market'], "Pourquoi ce pick a-t-il été choisi ?").then((res) {
-                setDialogState(() {
-                  aiResponse = res;
-                  isLoading = false;
-                });
+            // Fonction interne pour poser une question à l'IA
+            void askAi(String question) {
+              setDialogState(() {
+                isLoading = true;
+                currentQuestion = question;
               });
+              
+              ApiService.explainPick(pick['match_id'], pick['market'], question).then((res) {
+                if (context.mounted) {
+                  setDialogState(() {
+                    aiResponse = res;
+                    isLoading = false;
+                  });
+                }
+              });
+            }
+
+            // Appel initial (seulement la première fois)
+            if (isLoading && aiResponse == null) {
+              askAi(currentQuestion);
             }
 
             return AlertDialog(
@@ -147,60 +159,101 @@ class _TicketsScreenState extends State<TicketsScreen> {
                 children: [
                   const Icon(Icons.smart_toy, color: Colors.blue),
                   const SizedBox(width: 8),
-                  Text('Analyse du pick', style: const TextStyle(fontSize: 16)),
+                  const Text('Analyse & Chat IA', style: TextStyle(fontSize: 16)),
                 ],
               ),
-              content: isLoading 
-                  ? const SizedBox(height: 100, child: Center(child: CircularProgressIndicator()))
-                  : SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            aiResponse?['explanation'] ?? 'Pas de réponse de l\\'IA.',
-                            style: const TextStyle(fontSize: 13),
-                          ),
-                          
-                          // Si l'IA propose une alternative, on affiche le bouton
-                          if (aiResponse?['alternative_market'] != null) ...[
-                            const SizedBox(height: 16),
-                            const Divider(),
-                            const Text("L'IA suggère une alternative plus sûre :", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                            const SizedBox(height: 8),
-                            ElevatedButton.icon(
-                              icon: const Icon(Icons.swap_horiz),
-                              label: Text("Remplacer par ${aiResponse?['alternative_description']}"),
-                              style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-                              onPressed: () {
-                                // 👇 C'est ici qu'on modifie le ticket dynamiquement !
-                                setState(() {
-                                  // On met à jour le marché et la cote du pick dans la liste
-                                  final List picks = _weekMode 
-                                      ? (_showValueWeek ? _weekValueTicket!['picks'] : _weekTicket!['picks']) 
-                                      : _tickets![/* logique de ton ticket actuel */]['picks'];
-                                  
-                                  // Trouver le pick et le modifier
-                                  for (var i = 0; i < picks.length; i++) {
-                                    if (picks[i]['match_id'] == pick['match_id']) {
-                                      picks[i]['market'] = aiResponse!['alternative_market'];
-                                      picks[i]['description'] = aiResponse!['alternative_description'];
-                                      picks[i]['proba'] = aiResponse!['alternative_proba'];
-                                      picks[i]['cote'] = 1.0 / aiResponse!['alternative_proba'];
-                                      break;
-                                    }
-                                  }
-                                });
-                                Navigator.pop(context); // Fermer le dialogue
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('Pick modifié avec succès !')),
-                                );
-                              },
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // 1. Affichage de la question posée
+                      Text('Question : "$currentQuestion"', 
+                        style: const TextStyle(fontStyle: FontStyle.italic, color: Colors.grey, fontSize: 12)),
+                      const SizedBox(height: 12),
+                      
+                      // 2. Affichage de la réponse de l'IA
+                      if (isLoading)
+                        const SizedBox(height: 80, child: Center(child: CircularProgressIndicator()))
+                      else ...[
+                        Text(
+                          aiResponse?['explanation'] ?? 'Désolé, je n\'ai pas pu analyser ce pick.',
+                          style: const TextStyle(fontSize: 13, height: 1.4),
+                        ),
+                        
+                        // 3. Si l'IA propose une alternative, on affiche le bouton
+                        if (aiResponse?['alternative_market'] != null) ...[
+                          const SizedBox(height: 16),
+                          const Divider(),
+                          const Text("💡 Suggestion d'alternative :", 
+                            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.green)),
+                          const SizedBox(height: 8),
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.swap_horiz),
+                            label: Text("Remplacer par ${aiResponse?['alternative_description']}"),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.green,
+                              foregroundColor: Colors.white,
+                              minimumSize: const Size(double.infinity, 40),
                             ),
-                          ]
-                        ],
+                            onPressed: () {
+                              // 👇 APPEL À LA FONCTION DE MISE À JOUR DYNAMIQUE 👇
+                              _updatePickInCurrentView(
+                                pick['match_id'] as int,
+                                aiResponse!['alternative_market'].toString(),
+                                aiResponse!['alternative_description'].toString(),
+                                (aiResponse!['alternative_proba'] as num).toDouble(),
+                              );
+                              
+                              Navigator.pop(context); // Fermer la popup
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('✅ Pick modifié et ticket recalculé !'),
+                                  backgroundColor: Colors.green,
+                                ),
+                              );
+                            },
+                          ),
+                        ]
+                      ],
+                      
+                      const SizedBox(height: 16),
+                      const Divider(),
+                      
+                      // 4. Champ de texte pour continuer la discussion
+                      TextField(
+                        controller: textController,
+                        decoration: InputDecoration(
+                          hintText: "Ex: Et si on jouait le BTTS ?",
+                          hintStyle: const TextStyle(fontSize: 12),
+                          suffixIcon: IconButton(
+                            icon: const Icon(Icons.send, color: Colors.blue, size: 20),
+                            onPressed: () {
+                              if (textController.text.trim().isNotEmpty) {
+                                askAi(textController.text.trim());
+                                textController.clear();
+                              }
+                            },
+                          ),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        ),
+                        style: const TextStyle(fontSize: 13),
+                        onSubmitted: (val) {
+                          if (val.trim().isNotEmpty) {
+                            askAi(val.trim());
+                            textController.clear();
+                          }
+                        },
                       ),
-                    ),
+                    ],
+                  ),
+                ),
+              ),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(context),
@@ -785,6 +838,58 @@ class _TicketsScreenState extends State<TicketsScreen> {
     );
   }
 
+    void _updatePickInCurrentView(int matchId, String newMarket, String newDesc, double newProba) {
+    double newCote = 1.0 / newProba;
+
+    // Fonction utilitaire pour mettre à jour un ticket spécifique
+    void processTicket(Map<String, dynamic>? ticketData) {
+      if (ticketData == null) return;
+      final picks = ticketData['picks'] as List?;
+      if (picks == null) return;
+
+      bool updated = false;
+      double newTotalCote = 1.0;
+      double newJointProb = 1.0;
+
+      for (var p in picks) {
+        if (p['match_id'] == matchId) {
+          p['market'] = newMarket;
+          p['description'] = newDesc;
+          p['proba'] = newProba;
+          p['cote'] = newCote;
+          updated = true;
+        }
+        // On recalcule la cote totale et la proba jointe au passage
+        newTotalCote *= ((p['cote'] ?? 1.0) as num).toDouble();
+        newJointProb *= ((p['proba'] ?? 1.0) as num).toDouble();
+      }
+
+      if (updated) {
+        ticketData['total_cote'] = newTotalCote;
+        ticketData['joint_prob_pct'] = newJointProb * 100;
+        ticketData['total_picks'] = picks.length; // au cas où
+      }
+    }
+
+    // On met à jour l'état et on rafraîchit l'écran
+    setState(() {
+      if (_weekMode) {
+        // Si on est dans la vue Semaine, on met à jour les deux tickets (Complet et Value)
+        processTicket(_weekTicket);
+        processTicket(_weekValueTicket);
+      } else {
+        // Si on est dans la vue Jour, on cherche dans les 4 tickets
+        if (_tickets != null) {
+          processTicket(_tickets!['safe']);
+          processTicket(_tickets!['medium_short']);
+          processTicket(_tickets!['medium_long']);
+          processTicket(_tickets!['risky']);
+          processTicket(_tickets!['medium']); // fallback
+        }
+      }
+    });
+  }
+                          
   Widget _buildPickRow(Map p) {
     final result = (p['result'] ?? 'pending').toString();
     final reason = (p['reason'] ?? '').toString();
