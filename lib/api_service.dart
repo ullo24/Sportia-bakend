@@ -180,4 +180,25 @@ class ApiService {
       return {};
     }
   }
+
+  static Future<Map<String, dynamic>> explainPick(int matchId, String market, String question) async {
+    try {
+      final res = await http.post(
+        Uri.parse('$API_BASE/api/pick/explain'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "match_id": matchId,
+          "current_market": market,
+          "user_question": question
+        }),
+      ).timeout(const Duration(seconds: 30));
+      
+      if (res.statusCode == 200) {
+        return jsonDecode(res.body) as Map<String, dynamic>;
+      }
+      return {};
+    } catch (e) {
+      return {};
+    }
+  }
 }
