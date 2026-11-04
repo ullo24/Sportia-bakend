@@ -1087,7 +1087,7 @@ async def daily_pipeline():
         for code, league_name in COMPETITIONS.items():
             try:
                 await fetch_team_stats(code, league_name)
-                await asyncio.sleep(7)
+                await asyncio.sleep(12)
             except Exception as e:
                 print(f"Erreur stats {code}: {e}")
 
@@ -2695,11 +2695,39 @@ async def explain_pick(req: PickExplainRequest):
             ]
         }
 
+                # 4. Appel à l'API de Groq (compatible avec le format OpenAI)
+        LLM_API_KEY = os.getenv("LLM_API_KEY") # Assurez-vous que cette variable contient bien votre clé Groq
+        
+        # URL de l'API de Groq
+        GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+        
+        headers = {
+            "Authorization": f"Bearer {LLM_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            # Choisissez un modèle disponible sur Groq, par exemple :
+            "model": "llama-3.3-70b-versatile", 
+            "response_format": { "type": "json_object" },
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        }
+
         async with httpx.AsyncClient() as client:
-            response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=30)
+            # On utilise l'URL de Groq
+            response = await client.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
             res_data = response.json()
+
+            # Gestion d'erreur plus robuste pour voir le vrai message
+            if "choices" not in res_data:
+                print(f"ERREUR RÉELLE DE L'IA (Groq) : {res_data}")
+                return {"error": f"L'IA a renvoyé une erreur: {res_data.get('error', {}).get('message', 'Inconnue')}"}
+
             ai_text = res_data['choices'][0]['message']['content']
-            ai_json = json.loads(ai_text) # On parse le JSON renvoyé par l'IA
+            ai_json = json.loads(ai_text)
 
         return ai_json
 
