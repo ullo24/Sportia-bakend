@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from pydantic import BaseModel
 
 
 load_dotenv()
@@ -2638,3 +2639,70 @@ async def clean_upcoming():
         return {"status": "success", "message": f"{deleted} matchs à venir ont été supprimés. Les matchs FINISHED sont intacts."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+# ===== CHATBOT IA =====
+class PickExplainRequest(BaseModel):
+    match_id: int
+    current_market: str
+    user_question: str = "Pourquoi ce pick a-t-il été choisi ?"
+
+@app.post("/api/pick/explain")
+async def explain_pick(req: PickExplainRequest):
+    try:
+        # 1. Récupérer le match en base
+        conn = db()
+        c = conn.cursor()
+        c.execute("SELECT * FROM matches WHERE id=%s", (req.match_id,))
+        row = c.fetchone()
+        c.close()
+        conn.close()
+
+        if not row:
+            return {"error": "Match non trouvé"}
+
+        m = dict(row)
+        
+        # 2. Préparer le contexte pour l'IA (xG, probas, marché actuel)
+        context = f"""
+        Match: {m['home']} vs {m['away']} ({m['league']})
+        Buts attendus (xG): {m['home_xg']} pour {m['home']}, {m['away_xg']} pour {m['away']}
+        Probabilités 1X2: {m['home_win']*100:.1f}% / {m['draw']*100:.1f}% / {m['away_win']*100:.1f}%
+        Le pari actuel est: {req.current_market}
+        """
+
+        # 3. Construire le prompt
+        system_prompt = """Tu es un analyste sportif expert. Ton but est d'expliquer de manière pédagogue et concise pourquoi un modèle mathématique a choisi un pari.
+        L'utilisateur peut te demander une alternative plus sûre. Si c'est le cas, tu dois proposer un autre marché parmi ceux disponibles (ex: Passer de 'Victoire' à 'Double Chance 1X' ou 'Over 1.5 buts').
+        Tu dois impérativement répondre en JSON avec le format suivant :
+        {
+            "explanation": "Ton explication ici...",
+            "alternative_market": "Le code du marché (ex: 1X) ou null",
+            "alternative_description": "Description (ex: Double Chance 1X) ou null",
+            "alternative_proba": 0.75 (la proba du nouveau marché) ou null
+        }"""
+
+        user_prompt = f"Contexte du match : {context}\n\nQuestion de l'utilisateur : {req.user_question}"
+
+        # 4. Appel à l'API du LLM (Exemple avec OpenAI, modifie si tu utilises Groq/Gemini)
+        LLM_API_KEY = os.getenv("LLM_API_KEY")
+        headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "gpt-4o-mini", # ou un autre modèle
+            "response_format": { "type": "json_object" },
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=30)
+            res_data = response.json()
+            ai_text = res_data['choices'][0]['message']['content']
+            ai_json = json.loads(ai_text) # On parse le JSON renvoyé par l'IA
+
+        return ai_json
+
+    except Exception as e:
+        print(f"Erreur IA: {e}")
+        return {"error": "L'IA n'a pas pu répondre."}
