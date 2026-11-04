@@ -119,7 +119,100 @@ class _TicketsScreenState extends State<TicketsScreen> {
       );
     }
   }
+  
+  Future<void> _showAiChat(Map pick) async {
+    TextEditingController textController = TextEditingController();
+    
+    showDialog(
+      context: context,
+      builder: (context) {
+        bool isLoading = true;
+        Map<String, dynamic>? aiResponse;
+        
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            
+            // Appel initial à l'IA
+            if (isLoading) {
+              ApiService.explainPick(pick['match_id'], pick['market'], "Pourquoi ce pick a-t-il été choisi ?").then((res) {
+                setDialogState(() {
+                  aiResponse = res;
+                  isLoading = false;
+                });
+              });
+            }
 
+            return AlertDialog(
+              title: Row(
+                children: [
+                  const Icon(Icons.smart_toy, color: Colors.blue),
+                  const SizedBox(width: 8),
+                  Text('Analyse du pick', style: const TextStyle(fontSize: 16)),
+                ],
+              ),
+              content: isLoading 
+                  ? const SizedBox(height: 100, child: Center(child: CircularProgressIndicator()))
+                  : SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            aiResponse?['explanation'] ?? 'Pas de réponse de l\\'IA.',
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                          
+                          // Si l'IA propose une alternative, on affiche le bouton
+                          if (aiResponse?['alternative_market'] != null) ...[
+                            const SizedBox(height: 16),
+                            const Divider(),
+                            const Text("L'IA suggère une alternative plus sûre :", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                            const SizedBox(height: 8),
+                            ElevatedButton.icon(
+                              icon: const Icon(Icons.swap_horiz),
+                              label: Text("Remplacer par ${aiResponse?['alternative_description']}"),
+                              style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                              onPressed: () {
+                                // 👇 C'est ici qu'on modifie le ticket dynamiquement !
+                                setState(() {
+                                  // On met à jour le marché et la cote du pick dans la liste
+                                  final List picks = _weekMode 
+                                      ? (_showValueWeek ? _weekValueTicket!['picks'] : _weekTicket!['picks']) 
+                                      : _tickets![/* logique de ton ticket actuel */]['picks'];
+                                  
+                                  // Trouver le pick et le modifier
+                                  for (var i = 0; i < picks.length; i++) {
+                                    if (picks[i]['match_id'] == pick['match_id']) {
+                                      picks[i]['market'] = aiResponse!['alternative_market'];
+                                      picks[i]['description'] = aiResponse!['alternative_description'];
+                                      picks[i]['proba'] = aiResponse!['alternative_proba'];
+                                      picks[i]['cote'] = 1.0 / aiResponse!['alternative_proba'];
+                                      break;
+                                    }
+                                  }
+                                });
+                                Navigator.pop(context); // Fermer le dialogue
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Pick modifié avec succès !')),
+                                );
+                              },
+                            ),
+                          ]
+                        ],
+                      ),
+                    ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Fermer'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
  
   // 👇👇👇 INSÈRE ICI LE BLOC _safeTicket 👇👇👇
   Map<String, dynamic> _safeTicket(String key) {
@@ -692,18 +785,16 @@ class _TicketsScreenState extends State<TicketsScreen> {
     );
   }
 
-    Widget _buildPickRow(Map p) {
+  Widget _buildPickRow(Map p) {
     final result = (p['result'] ?? 'pending').toString();
     final reason = (p['reason'] ?? '').toString();
     final currentScore = p['current_score'];
 
-    // 👇 NOUVEAU : Formatage de la date et de l'heure
+    // Formatage de la date et de l'heure
     String dateStr = '';
     if (p['kickoff'] != null) {
       try {
-        // On parse la date ISO (ex: 2026-10-31T17:30:00Z) et on la convertit en heure locale
         final dt = DateTime.parse(p['kickoff']).toLocal();
-        // On formate : "31 Oct à 18:30"
         dateStr = DateFormat("d MMM 'à' HH:mm", 'fr').format(dt);
       } catch (_) {}
     }
@@ -759,7 +850,7 @@ class _TicketsScreenState extends State<TicketsScreen> {
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis),
-                  // 👇 NOUVEAU : Affichage de l'heure
+                  // Affichage de l'heure
                   if (dateStr.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 2, bottom: 2),
@@ -778,7 +869,6 @@ class _TicketsScreenState extends State<TicketsScreen> {
                         ],
                       ),
                     ),
-                  // 👆 FIN DU NOUVEAU BLOC
                   const SizedBox(height: 2),
                   Row(
                     children: [
@@ -819,12 +909,14 @@ class _TicketsScreenState extends State<TicketsScreen> {
               ),
             ),
             const SizedBox(width: 8),
+            
+            // 👇 COLONNE DE DROITE (Cote, Statut et Bouton IA) 👇
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
                     color: const Color(PRIMARY_COLOR).withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(6),
@@ -850,8 +942,30 @@ class _TicketsScreenState extends State<TicketsScreen> {
                         )),
                   ],
                 ),
-                const SizedBox(height: 2),
-                const Icon(Icons.chevron_right, size: 14, color: Colors.grey),
+                const SizedBox(height: 6),
+                
+                // 👇 LE BOUTON IA EST ICI 👇
+                InkWell(
+                  onTap: () => _showAiChat(p),
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.blue.withValues(alpha: 0.3), width: 1),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.smart_toy, size: 12, color: Colors.blue),
+                        SizedBox(width: 4),
+                        Text('IA', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.blue)),
+                      ],
+                    ),
+                  ),
+                ),
+                // 👆 FIN DU BOUTON IA 👆
               ],
             ),
           ],
@@ -859,7 +973,7 @@ class _TicketsScreenState extends State<TicketsScreen> {
       ),
     );
   }
-
+  
   Widget _buildDisclaimer() {
     return Container(
       padding: const EdgeInsets.all(14),
