@@ -1729,6 +1729,7 @@ def _build_weekly_ticket(all_picks):
     # 1. Regrouper les picks par match unique
     by_match = {}
     for p in all_picks:
+        # Au lieu de garder l'heure exacte, on garde juste la date
         match_key = (p["home"].strip().lower(), p["away"].strip().lower(), p["kickoff"][:10])
         by_match.setdefault(match_key, []).append(p)
 
@@ -2676,99 +2677,62 @@ async def explain_pick(req: PickExplainRequest):
 
         user_prompt = f"Contexte du match : {context}\n\nQuestion de l'utilisateur : {req.user_question}"
 
-        # 4. Appel à l'API Gemini
-        GEMINI_API_KEY = os.getenv("LLM_API_KEY") 
+                # 4. Appel à l'IA avec Fallback (Gemini -> Groq)
+        GEMINI_API_KEY = os.getenv("LLM_API_KEY")
+        GROQ_API_KEY = os.getenv("GROQ_API_KEY") # Assure-toi d'avoir ajouté cette variable sur Render
         
-        model_name = "gemini-3.8-flash"
-        GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-        
-        headers = {
-            "x-goog-api-key": GEMINI_API_KEY,
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
-                        {"text": f"{system_prompt}\n\n{user_prompt}"}
+        ai_text = None
+        last_error = None
+
+        # --- TENTATIVE 1 : GEMINI 3.8 FLASH ---
+        try:
+            print("🤖 Tentative avec Gemini 3.8 Flash...")
+            url_gemini = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+            headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]}],
+                "generationConfig": {"responseMimeType": "application/json"}
+            }
+            async with httpx.AsyncClient(timeout=15) as client:
+                res = await client.post(url_gemini, headers=headers, json=payload)
+                res_data = res.json()
+                if "candidates" in res_data:
+                    ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
+                else:
+                    last_error = f"Gemini: {res_data.get('error', {}).get('message', 'Erreur inconnue')}"
+        except Exception as e:
+            last_error = f"Gemini Exception: {str(e)}"
+
+        # --- TENTATIVE 2 : GROQ (FALLBACK) ---
+        if not ai_text and GROQ_API_KEY:
+            try:
+                print("🤖 Échec Gemini, tentative avec Groq...")
+                url_groq = "https://api.groq.com/openai/v1/chat/completions"
+                headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+                payload = {
+                    "model": "openai/gpt-oss-120b", # Le modèle Groq
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
                     ]
                 }
-            ],
-            "generationConfig": {
-                "responseMimeType": "application/json" 
-            }
-        }
+                async with httpx.AsyncClient(timeout=15) as client:
+                    res = await client.post(url_groq, headers=headers, json=payload)
+                    res_data = res.json()
+                    if "choices" in res_data:
+                        ai_text = res_data['choices'][0]['message']['content']
+                    else:
+                        last_error += f" | Groq: {res_data.get('error', {}).get('message', 'Erreur inconnue')}"
+            except Exception as e:
+                last_error += f" | Groq Exception: {str(e)}"
 
-                # 4. Appel à l'API Gemini avec Retry & Fallback
-        GEMINI_API_KEY = os.getenv("LLM_API_KEY") 
-        
-        # Liste des modèles à essayer dans l'ordre (le plus récent d'abord)
-        models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash"]
-        
-        last_error = None
-        
-        for model_name in models_to_try:
-            print(f"🤖 Tentative d'analyse avec le modèle : {model_name}")
-            GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-            
-            headers = {
-                "x-goog-api-key": GEMINI_API_KEY,
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "contents": [
-                    {
-                        "role": "user",
-                        "parts": [
-                            {"text": f"{system_prompt}\n\n{user_prompt}"}
-                        ]
-                    }
-                ],
-                "generationConfig": {
-                    "responseMimeType": "application/json" 
-                }
-            }
+        # --- RÉSULTAT ---
+        if not ai_text:
+            print(f"🚨 Échec total de l'IA. Erreurs : {last_error}")
+            return {"error": "L'IA est momentanément indisponible. Veuillez réessayer."}
 
-            # On fait jusqu'à 3 tentatives par modèle (avec backoff)
-            for attempt in range(3):
-                try:
-                    async with httpx.AsyncClient() as client:
-                        response = await client.post(GEMINI_API_URL, headers=headers, json=payload, timeout=30)
-                        res_data = response.json()
-
-                        # Si c'est une erreur 503 (surcharge), on attend et on réessaie
-                        if "error" in res_data and res_data["error"].get("code") == 503:
-                            wait_time = 2 ** attempt # 1s, 2s, 4s
-                            print(f"⚠️ Modèle surchargé (503). Attente de {wait_time}s avant réessai {attempt+1}/3...")
-                            await asyncio.sleep(wait_time)
-                            continue # On passe à la tentative suivante
-
-                        # Si le modèle n'existe pas ou autre erreur 4xx, on arrête et on passe au modèle suivant
-                        if "candidates" not in res_data:
-                            print(f"❌ Erreur définitive avec {model_name} : {res_data.get('error', {}).get('message', 'Inconnue')}")
-                            last_error = res_data.get('error', {}).get('message', 'Erreur inconnue')
-                            break # On sort de la boucle des tentatives pour ce modèle
-
-                        # Succès ! On extrait la réponse
-                        ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
-                        ai_text = ai_text.replace("```json", "").replace("```", "").strip()
-                        ai_json = json.loads(ai_text)
-                        
-                        print(f"✅ Analyse réussie avec {model_name}.")
-                        return ai_json # On renvoie la réponse immédiatement
-
-                except Exception as e:
-                    print(f"⚠️ Exception lors de l'appel à {model_name} : {e}")
-                    last_error = str(e)
-                    continue
-
-        # Si on arrive ici, c'est que tous les modèles ont échoué
-        print(f"🚨 Échec total de l'IA. Dernière erreur : {last_error}")
-        return {"error": f"Impossible de joindre l'IA pour le moment ({last_error}). Veuillez réessayer."}
-    except Exception as e:
-        # 👈 C'EST CE BLOC QUI MANQUAIT !
-        print(f"Erreur IA (Exception générale): {e}")
-        return {"error": "L'IA n'a pas pu répondre en raison d'une erreur interne."}
+        # Nettoyage et parsing du JSON
+        ai_text = ai_text.replace("```json", "").replace("```", "").strip()
+        ai_json = json.loads(ai_text)
+        return ai_json
