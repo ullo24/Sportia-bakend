@@ -2679,7 +2679,7 @@ async def explain_pick(req: PickExplainRequest):
         # 4. Appel à l'API Gemini
         GEMINI_API_KEY = os.getenv("LLM_API_KEY") 
         
-        model_name = "gemini-2.5-flash"
+        model_name = "gemini-3.8-flash"
         GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         
         headers = {
