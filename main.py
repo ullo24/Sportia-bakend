@@ -2618,13 +2618,6 @@ async def manual_refresh():
     await daily_pipeline()
     return {"status": "refreshed", "days_ahead": DAYS_AHEAD}
 
-# ... (tes autres routes au dessus) ...
-
-@app.post("/refresh")
-async def manual_refresh():
-    await daily_pipeline()
-    return {"status": "refreshed", "days_ahead": DAYS_AHEAD}
-
 @app.post("/admin/clean-upcoming")
 async def clean_upcoming():
     try:
@@ -2683,54 +2676,44 @@ async def explain_pick(req: PickExplainRequest):
 
         user_prompt = f"Contexte du match : {context}\n\nQuestion de l'utilisateur : {req.user_question}"
 
-        # 4. Appel à l'API du LLM (Exemple avec OpenAI, modifie si tu utilises Groq/Gemini)
-        LLM_API_KEY = os.getenv("LLM_API_KEY")
-        headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "gpt-4o-mini", # ou un autre modèle
-            "response_format": { "type": "json_object" },
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-        }
-
-                # 4. Appel à l'API de Groq (compatible avec le format OpenAI)
-        LLM_API_KEY = os.getenv("LLM_API_KEY") # Assurez-vous que cette variable contient bien votre clé Groq
+        # 4. Appel à l'API Gemini
+        GEMINI_API_KEY = os.getenv("LLM_API_KEY") # Garde le même nom de variable sur Render
         
-        # URL de l'API de Groq
-        GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+        # Modèle recommandé : gemini-2.5-flash (rapide et performant)
+        model_name = "gemini-2.5-flash"
+        GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         
         headers = {
-            "Authorization": f"Bearer {LLM_API_KEY}",
+            "x-goog-api-key": GEMINI_API_KEY,
             "Content-Type": "application/json"
         }
         
+        # Gemini utilise "contents" avec "parts" au lieu de "messages"
         payload = {
-            # Choisissez un modèle disponible sur Groq, par exemple :
-            "model": "llama-3.3-70b-versatile", 
-            "response_format": { "type": "json_object" },
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": f"{system_prompt}\n\n{user_prompt}"}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json" # Force une réponse en JSON pur
+            }
         }
 
         async with httpx.AsyncClient() as client:
-            # On utilise l'URL de Groq
-            response = await client.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
+            response = await client.post(GEMINI_API_URL, headers=headers, json=payload, timeout=30)
             res_data = response.json()
 
-            # Gestion d'erreur plus robuste pour voir le vrai message
-            if "choices" not in res_data:
-                print(f"ERREUR RÉELLE DE L'IA (Groq) : {res_data}")
-                return {"error": f"L'IA a renvoyé une erreur: {res_data.get('error', {}).get('message', 'Inconnue')}"}
+            # Gestion d'erreur pour voir le vrai message de Gemini
+            if "candidates" not in res_data:
+                print(f"ERREUR RÉELLE DE L'IA (Gemini) : {res_data}")
+                return {"error": f"Gemini a renvoyé une erreur: {res_data.get('error', {}).get('message', 'Inconnue')}"}
 
-            ai_text = res_data['choices'][0]['message']['content']
+            # La structure de réponse de Gemini est différente
+            ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
             ai_json = json.loads(ai_text)
 
         return ai_json
-
-    except Exception as e:
-        print(f"Erreur IA: {e}")
-        return {"error": "L'IA n'a pas pu répondre."}
