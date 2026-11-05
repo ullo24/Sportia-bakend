@@ -2677,9 +2677,8 @@ async def explain_pick(req: PickExplainRequest):
         user_prompt = f"Contexte du match : {context}\n\nQuestion de l'utilisateur : {req.user_question}"
 
         # 4. Appel à l'API Gemini
-        GEMINI_API_KEY = os.getenv("LLM_API_KEY") # Garde le même nom de variable sur Render
+        GEMINI_API_KEY = os.getenv("LLM_API_KEY") 
         
-        # Modèle recommandé : gemini-2.5-flash (rapide et performant)
         model_name = "gemini-2.5-flash"
         GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         
@@ -2688,7 +2687,6 @@ async def explain_pick(req: PickExplainRequest):
             "Content-Type": "application/json"
         }
         
-        # Gemini utilise "contents" avec "parts" au lieu de "messages"
         payload = {
             "contents": [
                 {
@@ -2699,7 +2697,7 @@ async def explain_pick(req: PickExplainRequest):
                 }
             ],
             "generationConfig": {
-                "responseMimeType": "application/json" # Force une réponse en JSON pur
+                "responseMimeType": "application/json" 
             }
         }
 
@@ -2712,8 +2710,13 @@ async def explain_pick(req: PickExplainRequest):
                 print(f"ERREUR RÉELLE DE L'IA (Gemini) : {res_data}")
                 return {"error": f"Gemini a renvoyé une erreur: {res_data.get('error', {}).get('message', 'Inconnue')}"}
 
-            # La structure de réponse de Gemini est différente
+            # La structure de réponse de Gemini
             ai_text = res_data['candidates'][0]['content']['parts'][0]['text']
             ai_json = json.loads(ai_text)
 
         return ai_json
+
+    except Exception as e:
+        # 👈 C'EST CE BLOC QUI MANQUAIT !
+        print(f"Erreur IA (Exception générale): {e}")
+        return {"error": "L'IA n'a pas pu répondre en raison d'une erreur interne."}
