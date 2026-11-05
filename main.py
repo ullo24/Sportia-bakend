@@ -2642,7 +2642,7 @@ class PickExplainRequest(BaseModel):
 
 @app.post("/api/pick/explain")
 async def explain_pick(req: PickExplainRequest):
-    try:
+    try: # 👈 TRY PRINCIPAL (ouvert ici)
         # 1. Récupérer le match en base
         conn = db()
         c = conn.cursor()
@@ -2656,7 +2656,7 @@ async def explain_pick(req: PickExplainRequest):
 
         m = dict(row)
         
-        # 2. Préparer le contexte pour l'IA (xG, probas, marché actuel)
+        # 2. Préparer le contexte pour l'IA
         context = f"""
         Match: {m['home']} vs {m['away']} ({m['league']})
         Buts attendus (xG): {m['home_xg']} pour {m['home']}, {m['away_xg']} pour {m['away']}
@@ -2664,25 +2664,24 @@ async def explain_pick(req: PickExplainRequest):
         Le pari actuel est: {req.current_market}
         """
 
-        # 3. Construire le prompt
         system_prompt = """Tu es un analyste sportif expert. Ton but est d'expliquer de manière pédagogue et concise pourquoi un modèle mathématique a choisi un pari.
-        L'utilisateur peut te demander une alternative plus sûre. Si c'est le cas, tu dois proposer un autre marché parmi ceux disponibles (ex: Passer de 'Victoire' à 'Double Chance 1X' ou 'Over 1.5 buts').
+        L'utilisateur peut te demander une alternative plus sûre. Si c'est le cas, tu dois proposer un autre marché parmi ceux disponibles.
         Tu dois impérativement répondre en JSON avec le format suivant :
         {
             "explanation": "Ton explication ici...",
             "alternative_market": "Le code du marché (ex: 1X) ou null",
             "alternative_description": "Description (ex: Double Chance 1X) ou null",
-            "alternative_proba": 0.75 (la proba du nouveau marché) ou null
+            "alternative_proba": 0.75
         }"""
 
         user_prompt = f"Contexte du match : {context}\n\nQuestion de l'utilisateur : {req.user_question}"
 
-                # 4. Appel à l'IA avec Fallback (Gemini -> Groq)
+        # 3. Appel à l'IA avec Fallback (Gemini -> Groq)
         GEMINI_API_KEY = os.getenv("LLM_API_KEY")
-        GROQ_API_KEY = os.getenv("GROQ_API_KEY") # Assure-toi d'avoir ajouté cette variable sur Render
+        GROQ_API_KEY = os.getenv("GROQ_API_KEY") 
         
         ai_text = None
-        last_error = None
+        last_error = ""
 
         # --- TENTATIVE 1 : GEMINI 3.8 FLASH ---
         try:
@@ -2710,7 +2709,7 @@ async def explain_pick(req: PickExplainRequest):
                 url_groq = "https://api.groq.com/openai/v1/chat/completions"
                 headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
                 payload = {
-                    "model": "openai/gpt-oss-120b", # Le modèle Groq
+                    "model": "openai/gpt-oss-120b",
                     "response_format": {"type": "json_object"},
                     "messages": [
                         {"role": "system", "content": system_prompt},
@@ -2727,7 +2726,7 @@ async def explain_pick(req: PickExplainRequest):
             except Exception as e:
                 last_error += f" | Groq Exception: {str(e)}"
 
-        # --- RÉSULTAT ---
+        # --- VÉRIFICATION FINALE ---
         if not ai_text:
             print(f"🚨 Échec total de l'IA. Erreurs : {last_error}")
             return {"error": "L'IA est momentanément indisponible. Veuillez réessayer."}
@@ -2735,4 +2734,9 @@ async def explain_pick(req: PickExplainRequest):
         # Nettoyage et parsing du JSON
         ai_text = ai_text.replace("```json", "").replace("```", "").strip()
         ai_json = json.loads(ai_text)
+        
         return ai_json
+
+    except Exception as e: # 👈 C'EST CE BLOC QUI MANQUAIT À LA FIN
+        print(f"Erreur générale IA : {e}")
+        return {"error": "Une erreur interne est survenue lors de l'analyse."}
