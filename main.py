@@ -1952,32 +1952,105 @@ def get_premium_predictions(day: str):
         result.append(m)
     return result
 
+def compute_h2h(home_team: str, away_team: str, before_date: str, limit: int = 5):
+    """Calcule les 5 dernières confrontations directes avant la date du match."""
+    conn = db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT home, away, home_goals, away_goals, kickoff
+        FROM matches
+        WHERE ((home = %s AND away = %s) OR (home = %s AND away = %s))
+          AND status = 'FINISHED'
+          AND kickoff < %s
+        ORDER BY kickoff DESC
+        LIMIT %s
+    """, (home_team, away_team, away_team, home_team, before_date, limit))
+    rows = c.fetchall()
+    c.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def compute_standings_at_date(league: str, before_date: str, home_team: str, away_team: str):
+    """Calcule le classement de la ligue avant la date du match."""
+    conn = db()
+    c = conn.cursor()
+    # On récupère tous les matchs de cette ligue joués avant le match
+    c.execute("""
+        SELECT home, away, home_goals, away_goals
+        FROM matches
+        WHERE league = %s AND status = 'FINISHED' AND kickoff < %s
+    """, (league, before_date))
+    matches = c.fetchall()
+    c.close()
+    conn.close()
+
+    if not matches:
+        return []
+
+    stats = {}
+    def init_team(t):
+        if t not in stats:
+            stats[t] = {"team": t, "played": 0, "won": 0, "drawn": 0, "lost": 0, "gf": 0, "ga": 0, "pts": 0}
+
+    for m in matches:
+        h, a = m["home"], m["away"]
+        hg, ag = m["home_goals"], m["away_goals"]
+        init_team(h); init_team(a)
+        
+        stats[h]["played"] += 1; stats[a]["played"] += 1
+        stats[h]["gf"] += hg; stats[h]["ga"] += ag
+        stats[a]["gf"] += ag; stats[a]["ga"] += hg
+        
+        if hg > ag:
+            stats[h]["won"] += 1; stats[h]["pts"] += 3; stats[a]["lost"] += 1
+        elif hg < ag:
+            stats[a]["won"] += 1; stats[a]["pts"] += 3; stats[h]["lost"] += 1
+        else:
+            stats[h]["drawn"] += 1; stats[h]["pts"] += 1
+            stats[a]["drawn"] += 1; stats[a]["pts"] += 1
+
+    # Tri : Points > Différence de buts > Buts marqués
+    sorted_teams = sorted(stats.values(), key=lambda x: (-x["pts"], -(x["gf"] - x["ga"]), -x["gf"]))
+    
+    result = []
+    for i, t in enumerate(sorted_teams):
+        t["position"] = i + 1
+        t["gd"] = t["gf"] - t["ga"]
+        # On ne garde que les deux équipes du match
+        if t["team"] in [home_team, away_team]:
+            result.append(t)
+    return result
+    
 @app.get("/matches/{match_id}/detail")
 def match_detail(match_id: int):
     conn = db()
-    
-    # 👈 1. Création du curseur
     c = conn.cursor()
-    
-    # 👈 2. Utilisation du curseur et de %s
     c.execute("SELECT * FROM matches WHERE id=%s", (match_id,))
-    
-    # 👈 3. Récupération
     row = c.fetchone()
-    
-    # 👈 4. Fermeture
     c.close()
     conn.close()
     
     if not row:
         raise HTTPException(404, "Match introuvable")
     m = dict(row)
+    
     if m.get("exact_scores"):
         try:
             m["exact_scores"] = json.loads(m["exact_scores"])
         except Exception:
             m["exact_scores"] = []
+            
     m["analysis"] = generate_analysis(m)
+    
+    # 👇 NOUVEAU : Calcul du H2H et du Classement
+    try:
+        m["h2h"] = compute_h2h(m["home"], m["away"], m["kickoff"])
+        m["standings"] = compute_standings_at_date(m["league"], m["kickoff"], m["home"], m["away"])
+    except Exception as e:
+        print(f"Erreur calcul stats détaillées : {e}")
+        m["h2h"] = []
+        m["standings"] = []
+        
     return m
 
 @app.get("/leagues")
