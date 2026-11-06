@@ -67,6 +67,14 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
             const SizedBox(height: 16),
             _build1X2Section(m),
             const SizedBox(height: 16),
+            
+            // 👇 NOUVEAU : Ajout du H2H et du Classement 👇
+            _buildH2H(m),
+            const SizedBox(height: 16),
+            _buildStandings(m),
+            const SizedBox(height: 16),
+            // 👆 FIN DE L'AJOUT 👆
+
             _buildGoalsSection(m),
             const SizedBox(height: 16),
             _buildSpecialSection(m),
@@ -385,6 +393,168 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
     );
   }
 
+  // 👇 NOUVEAU : Affichage des Confrontations Directes (H2H)
+  Widget _buildH2H(dynamic m) {
+    final h2h = m['h2h'] as List? ?? [];
+    if (h2h.isEmpty) return const SizedBox.shrink();
+
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.swap_horiz, color: Color(PRIMARY_COLOR), size: 20),
+                SizedBox(width: 8),
+                Text(
+                  'Confrontations récentes',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: Color(TEXT_DARK),
+                  ),
+                ),
+              ],
+            ),
+            const Divider(height: 24),
+            ...h2h.map<Widget>((h) {
+              final date = h['kickoff'].toString().substring(0, 10);
+              final home = h['home'];
+              final away = h['away'];
+              final score = '${h['home_goals']} - ${h['away_goals']}';
+              
+              // On détermine le vainqueur pour colorer le score
+              final hg = h['home_goals'] as int? ?? 0;
+              final ag = h['away_goals'] as int? ?? 0;
+              Color scoreColor = Colors.grey.shade800;
+              if (hg > ag) scoreColor = const Color(PRIMARY_COLOR);
+              if (ag > hg) scoreColor = const Color(ACCENT_COLOR);
+
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 70,
+                      child: Text(date, style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+                    ),
+                    Expanded(
+                      child: Text(
+                        home, 
+                        textAlign: TextAlign.end, 
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 12),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade100, 
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.grey.shade300)
+                      ),
+                      child: Text(score, style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: scoreColor)),
+                    ),
+                    Expanded(
+                      child: Text(
+                        away, 
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 👇 NOUVEAU : Affichage du Classement
+  Widget _buildStandings(dynamic m) {
+    final standings = m['standings'] as List? ?? [];
+    if (standings.isEmpty) return const SizedBox.shrink();
+
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.leaderboard, color: Color(PRIMARY_COLOR), size: 20),
+                SizedBox(width: 8),
+                Text(
+                  'Classement avant le match',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: Color(TEXT_DARK),
+                  ),
+                ),
+              ],
+            ),
+            const Divider(height: 24),
+            Row(
+              children: [
+                const SizedBox(width: 30, child: Text('#', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey))),
+                const Expanded(child: Text('Équipe', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey))),
+                const SizedBox(width: 30, child: Text('Pts', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey), textAlign: TextAlign.center)),
+                const SizedBox(width: 40, child: Text('Diff', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey), textAlign: TextAlign.center)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ...standings.map<Widget>((s) {
+              final isHome = s['team'] == m['home'];
+              final gd = s['gd'] as int? ?? 0;
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  children: [
+                    SizedBox(width: 30, child: Text('${s['position']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+                    Expanded(
+                      child: Text(
+                        '${s['team']}', 
+                        style: TextStyle(fontSize: 13, fontWeight: isHome ? FontWeight.bold : FontWeight.normal),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    SizedBox(width: 30, child: Text('${s['pts']}', textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+                    SizedBox(
+                      width: 40, 
+                      child: Text(
+                        '${gd > 0 ? '+' : ''}$gd', 
+                        textAlign: TextAlign.center, 
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: gd > 0 ? Colors.green : (gd < 0 ? Colors.red : Colors.grey),
+                          fontWeight: FontWeight.w600
+                        )
+                      )
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildGoalsSection(dynamic m) {
     return _section(
       title: 'MARCHÉS BUTS',
@@ -471,10 +641,6 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
       _marketRow('Extérieur marque', m['away_scores'], null, 'Oui', null),
     ];
 
-    // Gere exact_scores qui peut etre :
-    // - une List (venant de /matches/{id}/detail)
-    // - une String JSON (venant de /matches-week)
-    // - null
     List<dynamic> exactScores = [];
     final raw = m['exact_scores'];
     if (raw is List) {
