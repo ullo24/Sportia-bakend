@@ -393,11 +393,10 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
     );
   }
 
-  // 👇 NOUVEAU : Affichage des Confrontations Directes (H2H)
+    // 👇 Affichage des Confrontations Directes (H2H)
   Widget _buildH2H(dynamic m) {
     final h2h = m['h2h'] as List? ?? [];
-    if (h2h.isEmpty) return const SizedBox.shrink();
-
+    
     return Card(
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -421,68 +420,77 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
               ],
             ),
             const Divider(height: 24),
-            ...h2h.map<Widget>((h) {
-              final date = h['kickoff'].toString().substring(0, 10);
-              final home = h['home'];
-              final away = h['away'];
-              final score = '${h['home_goals']} - ${h['away_goals']}';
-              
-              // On détermine le vainqueur pour colorer le score
-              final hg = h['home_goals'] as int? ?? 0;
-              final ag = h['away_goals'] as int? ?? 0;
-              Color scoreColor = Colors.grey.shade800;
-              if (hg > ag) scoreColor = const Color(PRIMARY_COLOR);
-              if (ag > hg) scoreColor = const Color(ACCENT_COLOR);
-
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Row(
-                  children: [
-                    SizedBox(
-                      width: 70,
-                      child: Text(date, style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
-                    ),
-                    Expanded(
-                      child: Text(
-                        home, 
-                        textAlign: TextAlign.end, 
-                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 12),
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: Colors.grey.shade100, 
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: Colors.grey.shade300)
-                      ),
-                      child: Text(score, style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: scoreColor)),
-                    ),
-                    Expanded(
-                      child: Text(
-                        away, 
-                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
+            
+            // 👇 Si la liste est vide, on affiche un message
+            if (h2h.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 10),
+                child: Text(
+                  'Aucune confrontation récente disponible en base de données pour cette compétition.',
+                  style: TextStyle(fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
                 ),
-              );
-            }),
+              )
+            else
+              ...h2h.map<Widget>((h) {
+                final date = h['kickoff'].toString().substring(0, 10);
+                final home = h['home'];
+                final away = h['away'];
+                final score = '${h['home_goals']} - ${h['away_goals']}';
+                
+                final hg = h['home_goals'] as int? ?? 0;
+                final ag = h['away_goals'] as int? ?? 0;
+                Color scoreColor = Colors.grey.shade800;
+                if (hg > ag) scoreColor = const Color(PRIMARY_COLOR);
+                if (ag > hg) scoreColor = const Color(ACCENT_COLOR);
+
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 70,
+                        child: Text(date, style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+                      ),
+                      Expanded(
+                        child: Text(
+                          home, 
+                          textAlign: TextAlign.end, 
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 12),
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade100, 
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: Colors.grey.shade300)
+                        ),
+                        child: Text(score, style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: scoreColor)),
+                      ),
+                      Expanded(
+                        child: Text(
+                          away, 
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }),
           ],
         ),
       ),
     );
   }
 
-  // 👇 NOUVEAU : Affichage du Classement
+  // 👇 Affichage du Classement
   Widget _buildStandings(dynamic m) {
     final standings = m['standings'] as List? ?? [];
-    if (standings.isEmpty) return const SizedBox.shrink();
 
     return Card(
       elevation: 2,
@@ -507,72 +515,72 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
               ],
             ),
             const Divider(height: 24),
-            Row(
-              children: [
-                const SizedBox(width: 30, child: Text('#', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey))),
-                const Expanded(child: Text('Équipe', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey))),
-                const SizedBox(width: 30, child: Text('Pts', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey), textAlign: TextAlign.center)),
-                const SizedBox(width: 40, child: Text('Diff', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey), textAlign: TextAlign.center)),
-              ],
-            ),
-            const SizedBox(height: 8),
-            ...standings.map<Widget>((s) {
-              final isHome = s['team'] == m['home'];
-              final gd = s['gd'] as int? ?? 0;
-              final teamLeague = s['league'] ?? ''; // 👈 On récupère le nom de la ligue
-              
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Row(
-                  children: [
-                    SizedBox(width: 30, child: Text('${s['position']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
-                    
-                    // 👇 MODIFICATION ICI : On utilise une Column pour l'équipe et sa ligue
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '${s['team']}', 
-                            style: TextStyle(
-                              fontSize: 13, 
-                              fontWeight: isHome ? FontWeight.bold : FontWeight.normal
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          // Si l'équipe vient d'une autre ligue (ex: Coupe d'Europe), on affiche la ligue en dessous
-                          if (teamLeague.isNotEmpty)
-                            Text(
-                              teamLeague, 
-                              style: TextStyle(
-                                fontSize: 9, 
-                                color: Colors.grey.shade600,
-                                fontStyle: FontStyle.italic
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                    // 👆 FIN DE LA MODIFICATION
 
-                    SizedBox(width: 30, child: Text('${s['pts']}', textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
-                    SizedBox(
-                      width: 40, 
-                      child: Text(
-                        '${gd > 0 ? '+' : ''}$gd', 
-                        textAlign: TextAlign.center, 
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: gd > 0 ? Colors.green : (gd < 0 ? Colors.red : Colors.grey),
-                          fontWeight: FontWeight.w600
-                        )
-                      )
-                    ),
-                  ],
+            // 👇 Si la liste est vide, on affiche un message
+            if (standings.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 10),
+                child: Text(
+                  'Les données de classement pour ce championnat ne sont pas encore disponibles.',
+                  style: TextStyle(fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
                 ),
-              );
-            }),
+              )
+            else ...[
+              Row(
+                children: [
+                  const SizedBox(width: 30, child: Text('#', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey))),
+                  const Expanded(child: Text('Équipe', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey))),
+                  const SizedBox(width: 30, child: Text('Pts', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey), textAlign: TextAlign.center)),
+                  const SizedBox(width: 40, child: Text('Diff', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey), textAlign: TextAlign.center)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              ...standings.map<Widget>((s) {
+                final isHome = s['team'] == m['home'];
+                final gd = s['gd'] as int? ?? 0;
+                final teamLeague = s['league'] ?? ''; 
+                
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(
+                    children: [
+                      SizedBox(width: 30, child: Text('${s['position']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${s['team']}', 
+                              style: TextStyle(fontSize: 13, fontWeight: isHome ? FontWeight.bold : FontWeight.normal),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            if (teamLeague.isNotEmpty)
+                              Text(
+                                teamLeague, 
+                                style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
+                              ),
+                          ],
+                        ),
+                      ),
+                      SizedBox(width: 30, child: Text('${s['pts']}', textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+                      SizedBox(
+                        width: 40, 
+                        child: Text(
+                          '${gd > 0 ? '+' : ''}$gd', 
+                          textAlign: TextAlign.center, 
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: gd > 0 ? Colors.green : (gd < 0 ? Colors.red : Colors.grey),
+                            fontWeight: FontWeight.w600
+                          )
+                        )
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            ]
           ],
         ),
       ),
