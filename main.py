@@ -71,6 +71,7 @@ ZAFRONIX_LEAGUES = {
     "EL": "Europa League",
     "MLS": "Major League Soccer",
     "UECL": "Conference League",
+    "UNL": "UEFA Nations League",  # 👈 AJOUTE CETTE LIGNE
 }
 
 COMPETITIONS = {
@@ -1213,8 +1214,12 @@ async def daily_pipeline():
                 if code in FC_LEAGUES:
                     league = {"SAU": "Saudi Pro League", "JPN": "J1 League", "KOR": "K League 1"}.get(code, code)
                 if code in GOAL_API_LEAGUES:
-                    league = {"ARG": "Liga Profesional Argentina", "CHN": "Chinese Super League"}.get(code, code)
-                
+                    league = {
+                        "ARG": "Liga Profesional Argentina", 
+                        "CHN": "Chinese Super League",
+                        "AFCON": "Africa Cup of Nations",              # 👈 AJOUTE
+                        "AFCON_Q": "Africa Cup of Nations Qualification" # 👈 AJOUTE
+                    }.get(code, code)                
                 country = m.get("area", {}).get("name", "International")
                 home = m["homeTeam"]["name"] or m["homeTeam"].get("shortName", "?")
                 away = m["awayTeam"]["name"] or m["awayTeam"].get("shortName", "?")
