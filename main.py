@@ -56,6 +56,11 @@ ZAFRONIX_API_KEY = os.getenv("ZAFRONIX_API_KEY")
 ZAFRONIX_BASE_URL = "https://api.zafronix.com/uefa/europaleague/v1"
 ZAFRONIX_BASE_URL_MLS = "https://api.zafronix.com/usa/mls/v1"
 ZAFRONIX_BASE_URL_UECL = "https://api.zafronix.com/uefa/conferenceleague/v1"
+# Ajouter après vos autres constantes Zafronix
+ZAFRONIX_NATIONS_LEAGUE_URL = "https://api.zafronix.com/uefa/nationsleague/v1"
+ZAFRONIX_WC_QUAL_UEFA_URL = "https://api.zafronix.com/fifa/worldcup/qualifiers/uefa/v1"
+ZAFRONIX_WC_QUAL_CAF_URL = "https://api.zafronix.com/fifa/worldcup/qualifiers/caf/v1"
+ZAFRONIX_AFRICA_CUP_URL = "https://api.zafronix.com/caf/afcon/v1"
 ZAFRONIX_LEAGUES = {
     "EL": "Europa League",
     "MLS": "Major League Soccer",
@@ -67,6 +72,8 @@ COMPETITIONS = {
     "BL1": "Bundesliga", "FL1": "Ligue 1", "DED": "Eredivisie",
     "PPL": "Primeira Liga", "CL": "Champions League",
     "BSA": "Campeonato Brasileiro",
+    "WC": "FIFA World Cup",
+    "EC": "UEFA European Championship",
 }
 
 LEAGUE_AVG_GOALS = {
@@ -76,6 +83,8 @@ LEAGUE_AVG_GOALS = {
     "SAU": 2.95, "JPN": 2.65, "KOR": 2.55,
     "ARG": 2.70, "CHN": 2.80,
     "MLS": 2.90,
+    "WC": 2.60,
+    "EC": 2.50,
 }
 
 DAYS_AHEAD = 7
@@ -914,7 +923,46 @@ async def fetch_zafronix_mls(season: int, date_from: str, date_to: str):
         print(f"Exception Zafronix MLS : {e}")
         return []
 
+async def fetch_zafronix_international(base_url: str, season: int, date_from: str, date_to: str, competition_name: str):
+    """Fonction générique pour récupérer les matchs des compétitions internationales Zafronix."""
+    if not ZAFRONIX_API_KEY:
+        print(f"ZAFRONIX_API_KEY non definie pour {competition_name}")
+        return []
+    url = f"{base_url}/matches"
+    headers = {"X-API-Key": ZAFRONIX_API_KEY}
+    params = {"season": season}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=headers, params=params)
+            if r.status_code != 200:
+                print(f"Erreur Zafronix {competition_name} : {r.status_code}")
+                return []
+            data = r.json()
+            events = data.get("matches") or data.get("data") or data
+            filtered = []
+            for ev in events:
+                ev_date = ev.get("date") or ev.get("utcDate") or ""
+                if ev_date and date_from <= ev_date[:10] <= date_to:
+                    filtered.append(ev)
+            print(f"Zafronix {competition_name} : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
+            return filtered
+    except Exception as e:
+        print(f"Exception Zafronix {competition_name} : {e}")
+        return []
 
+# Fonctions raccourcies pour chaque compétition
+async def fetch_zafronix_nations_league(season, date_from, date_to):
+    return await fetch_zafronix_international(ZAFRONIX_NATIONS_LEAGUE_URL, season, date_from, date_to, "Nations League")
+
+async def fetch_zafronix_wc_qual_uefa(season, date_from, date_to):
+    return await fetch_zafronix_international(ZAFRONIX_WC_QUAL_UEFA_URL, season, date_from, date_to, "WC Qual UEFA")
+
+async def fetch_zafronix_wc_qual_caf(season, date_from, date_to):
+    return await fetch_zafronix_international(ZAFRONIX_WC_QUAL_CAF_URL, season, date_from, date_to, "WC Qual CAF")
+
+async def fetch_zafronix_africa_cup(season, date_from, date_to):
+    return await fetch_zafronix_international(ZAFRONIX_AFRICA_CUP_URL, season, date_from, date_to, "Africa Cup")
+    
 def convert_zafronix_to_internal(events: list, league_code: str, league_name: str) -> list:
     converted = []
     for ev in events:
@@ -1070,6 +1118,44 @@ async def daily_pipeline():
                 await asyncio.sleep(1)
             except Exception as e:
                 print(f"Erreur Zafronix UECL: {e}")
+
+                # === Zafronix : Compétitions Internationales ===
+        if ZAFRONIX_API_KEY:
+            try:
+                nl_events = await fetch_zafronix_nations_league(season, date_from, date_to)
+                converted = convert_zafronix_to_internal(nl_events, "UNL", "UEFA Nations League")
+                all_matches.extend(converted)
+                print(f"Zafronix Nations League: {len(converted)} matchs")
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Erreur Zafronix Nations League: {e}")
+
+            try:
+                wc_uefa_events = await fetch_zafronix_wc_qual_uefa(season, date_from, date_to)
+                converted = convert_zafronix_to_internal(wc_uefa_events, "WCQ_UEFA", "WC Qualification UEFA")
+                all_matches.extend(converted)
+                print(f"Zafronix WC Qual UEFA: {len(converted)} matchs")
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Erreur Zafronix WC Qual UEFA: {e}")
+
+            try:
+                wc_caf_events = await fetch_zafronix_wc_qual_caf(season, date_from, date_to)
+                converted = convert_zafronix_to_internal(wc_caf_events, "WCQ_CAF", "WC Qualification CAF")
+                all_matches.extend(converted)
+                print(f"Zafronix WC Qual CAF: {len(converted)} matchs")
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Erreur Zafronix WC Qual CAF: {e}")
+
+            try:
+                afcon_events = await fetch_zafronix_africa_cup(season, date_from, date_to)
+                converted = convert_zafronix_to_internal(afcon_events, "AFCON", "Africa Cup of Nations")
+                all_matches.extend(converted)
+                print(f"Zafronix Africa Cup: {len(converted)} matchs")
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Erreur Zafronix Africa Cup: {e}")
 
         if ZAFRONIX_API_KEY:
             try:
