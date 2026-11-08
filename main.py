@@ -2959,3 +2959,31 @@ async def run_fc_history_import():
             await asyncio.sleep(5)
 
     print(f"=== IMPORTATION TERMINÉE : {total_inserted} matchs ajoutés en base ===")
+
+@app.post("/admin/fix-league-names")
+async def fix_league_names():
+    try:
+        conn = db()
+        c = conn.cursor()
+        
+        # Dictionnaire de correspondance (clé API -> Nom Propre)
+        mapping = {
+            "japan1": "J1 League",
+            "korea1": "K League 1",
+            "china": "Chinese Super League",
+            "saudi1": "Saudi Pro League",
+            "brazil1": "Campeonato Brasileiro",
+            "usa1": "Major League Soccer"
+        }
+        
+        total_updated = 0
+        for key, name in mapping.items():
+            c.execute("UPDATE matches SET league = %s WHERE league = %s", (name, key))
+            total_updated += c.rowcount
+            
+        conn.commit()
+        c.close()
+        conn.close()
+        return {"status": "success", "message": f"{total_updated} matchs mis à jour avec les bons noms de ligues."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
