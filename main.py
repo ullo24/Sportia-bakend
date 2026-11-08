@@ -1969,30 +1969,41 @@ def compute_h2h(home_team: str, away_team: str, before_date: str, limit: int = 5
     c.close()
     conn.close()
     return [dict(r) for r in rows]
-
+    
 def compute_standings_at_date(league: str, before_date: str, home_team: str, away_team: str):
-    """Calcule le classement. Pour les coupes, cherche le championnat de chaque équipe."""
+    """Calcule le classement de la ligue avant la date du match (uniquement pour la saison en cours)."""
+    from datetime import datetime
+    
     conn = db()
     c = conn.cursor()
     
+    # 1. Déterminer le début de la saison (ex: si le match est en mars 2026, la saison a commencé en juillet 2025)
+    dt = datetime.fromisoformat(before_date.replace("Z", "+00:00"))
+    if dt.month >= 7:
+        season_start = f"{dt.year}-07-01T00:00:00"
+    else:
+        season_start = f"{dt.year - 1}-07-01T00:00:00"
+    
     def get_team_standing(team, target_league=None):
-        # Si pas de ligue cible, on cherche le championnat principal de l'équipe
         if not target_league:
             c.execute("""
                 SELECT league, COUNT(*) as cnt FROM matches 
-                WHERE (home = %s OR away = %s) AND status = 'FINISHED' AND kickoff < %s
+                WHERE (home = %s OR away = %s) AND status = 'FINISHED' 
+                AND kickoff >= %s AND kickoff < %s
                 GROUP BY league ORDER BY cnt DESC LIMIT 1
-            """, (team, team, before_date))
+            """, (team, team, season_start, before_date))
             row = c.fetchone()
             if not row: return None
             target_league = row["league"]
         
-        # On récupère tous les matchs de ce championnat avant le match
+        # 👇 On ajoute la condition kickoff >= season_start pour ne prendre que la saison en cours
         c.execute("""
             SELECT home, away, home_goals, away_goals FROM matches
-            WHERE league = %s AND status = 'FINISHED' AND kickoff < %s
-        """, (target_league, before_date))
+            WHERE league = %s AND status = 'FINISHED' 
+            AND kickoff >= %s AND kickoff < %s
+        """, (target_league, season_start, before_date))
         matches = c.fetchall()
+        
         if not matches: return None
         
         stats = {}
@@ -2014,7 +2025,7 @@ def compute_standings_at_date(league: str, before_date: str, home_team: str, awa
             if t["team"] == team:
                 t["position"] = i + 1
                 t["gd"] = t["gf"] - t["ga"]
-                t["league"] = target_league  # On ajoute la ligue pour info
+                t["league"] = target_league
                 return t
         return None
     
@@ -2022,12 +2033,10 @@ def compute_standings_at_date(league: str, before_date: str, home_team: str, awa
     cup_names = ["Champions League", "Europa League", "Conference League", "UEFA Champions League", "UEFA Europa League", "UEFA Conference League"]
     
     if league in cup_names:
-        # Pour les coupes : on cherche le championnat de chaque équipe
         for team in [home_team, away_team]:
             s = get_team_standing(team)
             if s: result.append(s)
     else:
-        # Pour un championnat national : les deux équipes sont dans la même ligue
         for team in [home_team, away_team]:
             s = get_team_standing(team, target_league=league)
             if s: result.append(s)
