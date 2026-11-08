@@ -2837,3 +2837,116 @@ async def explain_pick(req: PickExplainRequest):
     except Exception as e: # 👈 C'EST CE BLOC QUI MANQUAIT À LA FIN
         print(f"Erreur générale IA : {e}")
         return {"error": "Une erreur interne est survenue lors de l'analyse."}
+
+# ===== IMPORTATION HISTORIQUE (LIGUES SPÉCIFIQUES) =====
+
+# Clés des ligues sur Football-Charts à importer
+FC_LEAGUES_TO_IMPORT = {
+    "SAU": "saudi1",      # Saudi Pro League
+    "JPN": "japan1",      # J1 League
+    "KOR": "korea1",      # K League 1
+    "UCL": "champions",   # UEFA Champions League (clé à vérifier)
+    "UEL": "europa",      # UEFA Europa League (clé à vérifier)
+    # Ajoute d'autres ligues si besoin (ex: "ARG": "argentina1")
+}
+
+@app.post("/admin/import-history-fc")
+async def import_history_fc(background_tasks: BackgroundTasks):
+    """Importe l'historique des ligues spécifiques via Football-Charts."""
+    background_tasks.add_task(run_fc_history_import)
+    return {"status": "started", "message": "L'importation tourne en arrière-plan. Vérifie les logs Render."}
+
+async def run_fc_history_import():
+    print("=== DÉBUT DE L'IMPORTATION HISTORIQUE (FOOTBALL-CHARTS) ===")
+    total_inserted = 0
+    
+    # Saisons à importer (la saison actuelle et la précédente)
+    current_year = date.today().year
+    seasons_to_try = [f"{current_year}-{current_year+1}", f"{current_year-1}-{current_year}"]
+
+    for code, league_key in FC_LEAGUES_TO_IMPORT.items():
+        for season in seasons_to_try:
+            print(f"Téléchargement de l'historique : {league_key} ({season})...")
+            
+            url = f"{FC_BASE_URL}/leagues/{league_key}/results/"
+            params = {"season": season}
+            headers = {}
+            if FC_API_KEY:
+                headers["Authorization"] = f"Bearer {FC_API_KEY}"
+
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    r = await client.get(url, headers=headers, params=params)
+                    if r.status_code != 200:
+                        print(f"  -> Erreur HTTP {r.status_code} pour {league_key} ({season})")
+                        continue
+                    
+                    data = r.json()
+                    # La réponse peut être une liste directe ou un objet avec "matches"
+                    matches = data if isinstance(data, list) else data.get("matches", [])
+                    if not matches:
+                        print(f"  -> Aucun match trouvé pour {league_key} ({season})")
+                        continue
+
+                    print(f"  -> {len(matches)} matchs trouvés.")
+                    
+                    conn = db()
+                    c = conn.cursor()
+                    
+                    for m in matches:
+                        try:
+                            # Extraction des champs (selon la structure de Football-Charts)
+                            home = m.get("home_team") or m.get("homeTeam") or "?"
+                            away = m.get("away_team") or m.get("awayTeam") or "?"
+                            
+                            # Les scores peuvent être dans "ft_result" ou "score"
+                            ft = m.get("ft_result") or m.get("score", {})
+                            if isinstance(ft, dict):
+                                hg = ft.get("home") or ft.get("home_goals")
+                                ag = ft.get("away") or ft.get("away_goals")
+                            else:
+                                # Si c'est une string "2-1"
+                                parts = str(ft).split("-")
+                                hg = int(parts[0].strip()) if len(parts) > 0 else None
+                                ag = int(parts[1].strip()) if len(parts) > 1 else None
+
+                            if hg is None or ag is None:
+                                continue
+
+                            kickoff = m.get("match_date") or m.get("date") or m.get("kickoff_utc")
+                            if not kickoff:
+                                continue
+                            if isinstance(kickoff, str) and "T" not in kickoff:
+                                kickoff = kickoff + "T00:00:00"
+
+                            # ID unique pour éviter les doublons
+                            slug = m.get("slug") or f"{league_key}-{home}-{away}-{kickoff[:10]}"
+                            hash_obj = hashlib.md5(str(slug).encode())
+                            numeric_hash = int(hash_obj.hexdigest(), 16) % (10**10)
+                            match_id = 4_000_000_000 + numeric_hash  # Offset différent pour ne pas collisionner
+
+                            # Insertion dans PostgreSQL
+                            c.execute("""
+                                INSERT INTO matches 
+                                (id, league, country, home, away, kickoff, status, home_goals, away_goals, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, 'FINISHED', %s, %s, NOW())
+                                ON CONFLICT (id) DO NOTHING
+                            """, (
+                                match_id, league_key, "International", 
+                                home, away, kickoff, hg, ag
+                            ))
+                            total_inserted += 1
+                        except Exception as e:
+                            print(f"    Erreur sur le match {m.get('id')}: {e}")
+                    
+                    conn.commit()
+                    c.close()
+                    conn.close()
+                    
+            except Exception as e:
+                print(f"  -> Exception pour {league_key} ({season}): {e}")
+            
+            # Pause pour respecter le quota (200 req/jour)
+            await asyncio.sleep(5)
+
+    print(f"=== IMPORTATION TERMINÉE : {total_inserted} matchs ajoutés en base ===")
