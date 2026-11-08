@@ -31,6 +31,7 @@ FC_LEAGUES = {
     "KOR": "korea1",
 }
 
+
 # ===== GOAL API CONFIG (Argentine + Chine) =====
 GOAL_API_KEY = os.getenv("GOAL_API_KEY")
 GOAL_API_BASE_URL = "https://api.goal-api.com/v1"
@@ -54,6 +55,8 @@ if not DATABASE_URL:
 #DB_PATH = "/tmp/sportia.db"
 _PIPELINE_RUNNING = False
 
+# Cache pour les ETags Zafronix (URL -> ETag)
+_ZAFRONIX_ETAG_CACHE = {}
 # Zafronix
 ZAFRONIX_API_KEY = os.getenv("ZAFRONIX_API_KEY")
 ZAFRONIX_BASE_URL = "https://api.zafronix.com/uefa/europaleague/v1"
@@ -844,102 +847,82 @@ async def fetch_competition_matches(code: str, date_from: str, date_to: str):
         except Exception as e:
             print("Exception " + code + " : " + str(e))
             return []
-
-
-async def fetch_zafronix_europa_league(season: int, date_from: str, date_to: str):
+        
+async def _fetch_zafronix_with_etag(url: str, headers: dict, params: dict, competition_name: str) -> list:
+    """Fonction générique pour appeler Zafronix avec gestion du cache ETag."""
     if not ZAFRONIX_API_KEY:
-        print("ZAFRONIX_API_KEY non definie")
         return []
-    url = f"{ZAFRONIX_BASE_URL}/matches"
-    headers = {"X-API-Key": ZAFRONIX_API_KEY}
-    params = {"season": season}
+
+    # On ajoute la clé API aux headers
+    headers["X-API-Key"] = ZAFRONIX_API_KEY
+
+    # 👈 On vérifie si on a un ETag en cache pour cette URL
+    cached_etag = _ZAFRONIX_ETAG_CACHE.get(url)
+    if cached_etag:
+        headers["If-None-Match"] = cached_etag
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.get(url, headers=headers, params=params)
-            if r.status_code != 200:
-                print(f"Erreur Zafronix EL : {r.status_code}")
+
+            # 👈 Si 304, les données n'ont pas changé : 0 quota consommé !
+            if r.status_code == 304:
+                print(f"Zafronix {competition_name} : 304 Not Modified (quota économisé)")
                 return []
-            data = r.json()
-            events = data.get("matches") or data.get("data") or data
-            filtered = []
-            for ev in events:
-                ev_date = ev.get("date") or ev.get("utcDate") or ""
-                if ev_date and date_from <= ev_date[:10] <= date_to:
-                    filtered.append(ev)
-            print(f"Zafronix EL : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
-            return filtered
-    except Exception as e:
-        print(f"Exception Zafronix EL : {e}")
-        return []
 
-
-async def fetch_zafronix_conference_league(season: int, date_from: str, date_to: str):
-    if not ZAFRONIX_API_KEY:
-        print("ZAFRONIX_API_KEY non definie")
-        return []
-    url = f"{ZAFRONIX_BASE_URL_UECL}/matches"
-    headers = {"X-API-Key": ZAFRONIX_API_KEY}
-    params = {"season": season}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url, headers=headers, params=params)
-            if r.status_code != 200:
-                print(f"Erreur Zafronix UECL : {r.status_code}")
-                return []
-            data = r.json()
-            events = data.get("matches") or data.get("data") or data
-            filtered = []
-            for ev in events:
-                ev_date = ev.get("date") or ev.get("utcDate") or ""
-                if ev_date and date_from <= ev_date[:10] <= date_to:
-                    filtered.append(ev)
-            print(f"Zafronix UECL : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
-            return filtered
-    except Exception as e:
-        print(f"Exception Zafronix UECL : {e}")
-        return []
-
-
-async def fetch_zafronix_mls(season: int, date_from: str, date_to: str):
-    if not ZAFRONIX_API_KEY:
-        print("ZAFRONIX_API_KEY non definie")
-        return []
-    url = f"{ZAFRONIX_BASE_URL_MLS}/matches"
-    headers = {"X-API-Key": ZAFRONIX_API_KEY}
-    params = {"season": season}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url, headers=headers, params=params)
-            if r.status_code != 200:
-                print(f"Erreur Zafronix MLS : {r.status_code}")
-                return []
-            data = r.json()
-            events = data.get("matches") or data.get("data") or data
-            filtered = []
-            for ev in events:
-                ev_date = ev.get("date") or ev.get("utcDate") or ""
-                if ev_date and date_from <= ev_date[:10] <= date_to:
-                    filtered.append(ev)
-            print(f"Zafronix MLS : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
-            return filtered
-    except Exception as e:
-        print(f"Exception Zafronix MLS : {e}")
-        return []
-
-async def fetch_zafronix_international(base_url: str, season: int, date_from: str, date_to: str, competition_name: str):
-    """Fonction générique pour récupérer les matchs des compétitions internationales Zafronix."""
-    if not ZAFRONIX_API_KEY:
-        print(f"ZAFRONIX_API_KEY non definie pour {competition_name}")
-        return []
-    url = f"{base_url}/matches"
-    headers = {"X-API-Key": ZAFRONIX_API_KEY}
-    params = {"season": season}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url, headers=headers, params=params)
             if r.status_code != 200:
                 print(f"Erreur Zafronix {competition_name} : {r.status_code}")
                 return []
+
+            # 👈 On sauvegarde le nouvel ETag pour la prochaine fois
+            new_etag = r.headers.get("ETag")
+            if new_etag:
+                _ZAFRONIX_ETAG_CACHE[url] = new_etag
+
+            data = r.json()
+            # Zafronix renvoie parfois les données dans "matches", "data", ou directement
+            events = data.get("matches") or data.get("data") or data
+            if not isinstance(events, list):
+                events = []
+                
+            return events
+    except Exception as e:
+        print(f"Exception Zafronix {competition_name} : {e}")
+        return []
+
+async def fetch_zafronix_international(base_url: str, season: int, date_from: str, date_to: str, competition_name: str):
+    """Fonction générique pour récupérer les matchs Zafronix avec gestion des ETags."""
+    if not ZAFRONIX_API_KEY:
+        print(f"ZAFRONIX_API_KEY non definie pour {competition_name}")
+        return []
+
+    url = f"{base_url}/matches"
+    params = {"season": season} # ou "year" selon l'API
+    headers = {"X-API-Key": ZAFRONIX_API_KEY}
+
+    # 👈 On regarde si on a déjà un ETag pour cette URL
+    cached_etag = _ZAFRONIX_ETAG_CACHE.get(url)
+    if cached_etag:
+        headers["If-None-Match"] = cached_etag
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=headers, params=params)
+
+            # 👈 Si la réponse est 304, les données n'ont pas changé
+            if r.status_code == 304:
+                print(f"Zafronix {competition_name} : 304 Not Modified (quota économisé)")
+                return [] # On retourne une liste vide, le pipeline continuera avec les autres sources
+
+            if r.status_code != 200:
+                print(f"Erreur Zafronix {competition_name} : {r.status_code}")
+                return []
+
+            # 👈 On stocke le nouvel ETag pour la prochaine fois
+            new_etag = r.headers.get("ETag")
+            if new_etag:
+                _ZAFRONIX_ETAG_CACHE[url] = new_etag
+
             data = r.json()
             events = data.get("matches") or data.get("data") or data
             filtered = []
@@ -953,35 +936,59 @@ async def fetch_zafronix_international(base_url: str, season: int, date_from: st
         print(f"Exception Zafronix {competition_name} : {e}")
         return []
 
-# Fonctions raccourcies pour chaque compétition
-async def fetch_zafronix_nations_league(season, date_from, date_to):
-    """Récupère les matchs de la Ligue des Nations via Zafronix."""
-    if not ZAFRONIX_API_KEY:
-        return []
-    url = f"{ZAFRONIX_NATIONS_LEAGUE_URL}/matches"
-    headers = {"X-API-Key": ZAFRONIX_API_KEY}
-    # 👈 Le paramètre est 'year' et non 'season'
-    params = {"year": season}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url, headers=headers, params=params)
-            if r.status_code != 200:
-                print(f"Erreur Zafronix Nations League : {r.status_code}")
-                return []
-            data = r.json()
-            events = data.get("matches") or data.get("data") or data
-            filtered = []
-            for ev in events:
-                ev_date = ev.get("date") or ev.get("utcDate") or ""
-                if ev_date and date_from <= ev_date[:10] <= date_to:
-                    filtered.append(ev)
-            print(f"Zafronix Nations League : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
-            return filtered
-    except Exception as e:
-        print(f"Exception Zafronix Nations League : {e}")
-        return []
-        
+async def fetch_zafronix_europa_league(season: int, date_from: str, date_to: str):
+    url = f"{ZAFRONIX_BASE_URL}/matches"
+    params = {"season": season}
+    events = await _fetch_zafronix_with_etag(url, {}, params, "Europa League")
     
+    filtered = []
+    for ev in events:
+        ev_date = ev.get("date") or ev.get("utcDate") or ""
+        if ev_date and date_from <= ev_date[:10] <= date_to:
+            filtered.append(ev)
+    print(f"Zafronix EL : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
+    return filtered
+
+async def fetch_zafronix_conference_league(season: int, date_from: str, date_to: str):
+    url = f"{ZAFRONIX_BASE_URL_UECL}/matches"
+    params = {"season": season}
+    events = await _fetch_zafronix_with_etag(url, {}, params, "Conference League")
+    
+    filtered = []
+    for ev in events:
+        ev_date = ev.get("date") or ev.get("utcDate") or ""
+        if ev_date and date_from <= ev_date[:10] <= date_to:
+            filtered.append(ev)
+    print(f"Zafronix UECL : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
+    return filtered
+
+async def fetch_zafronix_mls(season: int, date_from: str, date_to: str):
+    url = f"{ZAFRONIX_BASE_URL_MLS}/matches"
+    params = {"season": season}
+    events = await _fetch_zafronix_with_etag(url, {}, params, "MLS")
+    
+    filtered = []
+    for ev in events:
+        ev_date = ev.get("date") or ev.get("utcDate") or ""
+        if ev_date and date_from <= ev_date[:10] <= date_to:
+            filtered.append(ev)
+    print(f"Zafronix MLS : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
+    return filtered
+
+async def fetch_zafronix_nations_league(season: int, date_from: str, date_to: str):
+    url = f"{ZAFRONIX_NATIONS_LEAGUE_URL}/matches"
+    # 👈 Attention : pour la Nations League, le paramètre est "year" (comme vu précédemment)
+    params = {"year": season} 
+    events = await _fetch_zafronix_with_etag(url, {}, params, "Nations League")
+    
+    filtered = []
+    for ev in events:
+        ev_date = ev.get("date") or ev.get("utcDate") or ""
+        if ev_date and date_from <= ev_date[:10] <= date_to:
+            filtered.append(ev)
+    print(f"Zafronix Nations League : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
+    return filtered
+                
 def convert_zafronix_to_internal(events: list, league_code: str, league_name: str) -> list:
     converted = []
     for ev in events:
