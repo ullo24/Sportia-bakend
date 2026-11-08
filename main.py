@@ -2840,14 +2840,17 @@ async def explain_pick(req: PickExplainRequest):
 
 # ===== IMPORTATION HISTORIQUE (LIGUES SPÉCIFIQUES) =====
 
-# Clés des ligues sur Football-Charts à importer
+# Clés et saisons exactes vérifiées via /api/v1/leagues/
 FC_LEAGUES_TO_IMPORT = {
-    "SAU": "saudi1",      # Saudi Pro League
-    "JPN": "japan1",      # J1 League
-    "KOR": "korea1",      # K League 1
-    "UCL": "champions",   # UEFA Champions League (clé à vérifier)
-    "UEL": "europa",      # UEFA Europa League (clé à vérifier)
-    # Ajoute d'autres ligues si besoin (ex: "ARG": "argentina1")
+    # --- Asie ---
+    "JPN": {"key": "japan1", "seasons": ["2026", "2025"]},
+    "KOR": {"key": "korea1", "seasons": ["2026", "2025"]},
+    "CHN": {"key": "china", "seasons": ["2026", "2025"]},
+    "SAU": {"key": "saudi1", "seasons": ["2026-2027", "2025-2026"]},
+    
+    # --- Amériques ---
+    "BRA": {"key": "brazil1", "seasons": ["2026", "2025"]},
+    "MLS": {"key": "usa1", "seasons": ["2026", "2025"]},
 }
 
 @app.post("/admin/import-history-fc")
@@ -2865,6 +2868,9 @@ async def run_fc_history_import():
     seasons_to_try = [f"{current_year}-{current_year+1}", f"{current_year-1}-{current_year}"]
 
     for code, league_key in FC_LEAGUES_TO_IMPORT.items():
+        league_key = league_info["key"]
+        seasons_to_try = league_info["seasons"]
+        
         for season in seasons_to_try:
             print(f"Téléchargement de l'historique : {league_key} ({season})...")
             
