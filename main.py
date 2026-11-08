@@ -354,7 +354,9 @@ def compute_stats_from_history(team_name: str, n_matches: int = 40) -> dict:
     c.execute("""
         SELECT home, away, home_goals, away_goals, kickoff 
         FROM matches 
-        WHERE (home = %s OR away = %s) AND status = 'FINISHED' 
+        WHERE (home = %s OR away = %s) AND status = 'FINISHED'
+        AND home_goals IS NOT NULL 
+        AND away_goals IS NOT NULL
         ORDER BY kickoff DESC LIMIT %s
     """, (team_name, team_name, n_matches))
     
@@ -1171,6 +1173,8 @@ async def daily_pipeline():
         # === Stats équipes (football-data.org uniquement) ===
         print("Recuperation des stats d'equipes...")
         for code, league_name in COMPETITIONS.items():
+            if code in ["WC", "EC"]:
+                continue
             try:
                 await fetch_team_stats(code, league_name)
                 await asyncio.sleep(12)
