@@ -1971,56 +1971,71 @@ def compute_h2h(home_team: str, away_team: str, before_date: str, limit: int = 5
     return [dict(r) for r in rows]
 
 def compute_standings_at_date(league: str, before_date: str, home_team: str, away_team: str):
-    """Calcule le classement de la ligue avant la date du match."""
+    """Calcule le classement. Pour les coupes, cherche le championnat de chaque équipe."""
     conn = db()
     c = conn.cursor()
-    # On récupère tous les matchs de cette ligue joués avant le match
-    c.execute("""
-        SELECT home, away, home_goals, away_goals
-        FROM matches
-        WHERE league = %s AND status = 'FINISHED' AND kickoff < %s
-    """, (league, before_date))
-    matches = c.fetchall()
-    c.close()
-    conn.close()
-
-    if not matches:
-        return []
-
-    stats = {}
-    def init_team(t):
-        if t not in stats:
-            stats[t] = {"team": t, "played": 0, "won": 0, "drawn": 0, "lost": 0, "gf": 0, "ga": 0, "pts": 0}
-
-    for m in matches:
-        h, a = m["home"], m["away"]
-        hg, ag = m["home_goals"], m["away_goals"]
-        init_team(h); init_team(a)
+    
+    def get_team_standing(team, target_league=None):
+        # Si pas de ligue cible, on cherche le championnat principal de l'équipe
+        if not target_league:
+            c.execute("""
+                SELECT league, COUNT(*) as cnt FROM matches 
+                WHERE (home = %s OR away = %s) AND status = 'FINISHED' AND kickoff < %s
+                GROUP BY league ORDER BY cnt DESC LIMIT 1
+            """, (team, team, before_date))
+            row = c.fetchone()
+            if not row: return None
+            target_league = row["league"]
         
-        stats[h]["played"] += 1; stats[a]["played"] += 1
-        stats[h]["gf"] += hg; stats[h]["ga"] += ag
-        stats[a]["gf"] += ag; stats[a]["ga"] += hg
+        # On récupère tous les matchs de ce championnat avant le match
+        c.execute("""
+            SELECT home, away, home_goals, away_goals FROM matches
+            WHERE league = %s AND status = 'FINISHED' AND kickoff < %s
+        """, (target_league, before_date))
+        matches = c.fetchall()
+        if not matches: return None
         
-        if hg > ag:
-            stats[h]["won"] += 1; stats[h]["pts"] += 3; stats[a]["lost"] += 1
-        elif hg < ag:
-            stats[a]["won"] += 1; stats[a]["pts"] += 3; stats[h]["lost"] += 1
-        else:
-            stats[h]["drawn"] += 1; stats[h]["pts"] += 1
-            stats[a]["drawn"] += 1; stats[a]["pts"] += 1
-
-    # Tri : Points > Différence de buts > Buts marqués
-    sorted_teams = sorted(stats.values(), key=lambda x: (-x["pts"], -(x["gf"] - x["ga"]), -x["gf"]))
+        stats = {}
+        for m in matches:
+            h, a = m["home"], m["away"]
+            hg, ag = m["home_goals"], m["away_goals"]
+            for t in [h, a]:
+                if t not in stats:
+                    stats[t] = {"team": t, "played": 0, "gf": 0, "ga": 0, "pts": 0}
+            stats[h]["played"] += 1; stats[a]["played"] += 1
+            stats[h]["gf"] += hg; stats[h]["ga"] += ag
+            stats[a]["gf"] += ag; stats[a]["ga"] += hg
+            if hg > ag: stats[h]["pts"] += 3
+            elif hg < ag: stats[a]["pts"] += 3
+            else: stats[h]["pts"] += 1; stats[a]["pts"] += 1
+        
+        sorted_teams = sorted(stats.values(), key=lambda x: (-x["pts"], -(x["gf"] - x["ga"]), -x["gf"]))
+        for i, t in enumerate(sorted_teams):
+            if t["team"] == team:
+                t["position"] = i + 1
+                t["gd"] = t["gf"] - t["ga"]
+                t["league"] = target_league  # On ajoute la ligue pour info
+                return t
+        return None
     
     result = []
-    for i, t in enumerate(sorted_teams):
-        t["position"] = i + 1
-        t["gd"] = t["gf"] - t["ga"]
-        # On ne garde que les deux équipes du match
-        if t["team"] in [home_team, away_team]:
-            result.append(t)
-    return result
+    cup_names = ["Champions League", "Europa League", "Conference League", "UEFA Champions League", "UEFA Europa League", "UEFA Conference League"]
     
+    if league in cup_names:
+        # Pour les coupes : on cherche le championnat de chaque équipe
+        for team in [home_team, away_team]:
+            s = get_team_standing(team)
+            if s: result.append(s)
+    else:
+        # Pour un championnat national : les deux équipes sont dans la même ligue
+        for team in [home_team, away_team]:
+            s = get_team_standing(team, target_league=league)
+            if s: result.append(s)
+    
+    c.close()
+    conn.close()
+    return result
+
 @app.get("/matches/{match_id}/detail")
 def match_detail(match_id: int):
     conn = db()
