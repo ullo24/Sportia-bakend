@@ -2643,7 +2643,7 @@ async def run_history_import():
     print("=== DÉBUT DE L'IMPORTATION HISTORIQUE ===")
     
     # On va chercher la saison 2024-2025 (ou 2025 si tu préfères)
-    seasons = [2024, 2025] 
+    seasons = [2024, 2025, 2026] 
     total_inserted = 0
 
     for season in seasons:
