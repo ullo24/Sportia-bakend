@@ -2863,11 +2863,8 @@ async def run_fc_history_import():
     print("=== DÉBUT DE L'IMPORTATION HISTORIQUE (FOOTBALL-CHARTS) ===")
     total_inserted = 0
     
-    # Saisons à importer (la saison actuelle et la précédente)
-    current_year = date.today().year
-    seasons_to_try = [f"{current_year}-{current_year+1}", f"{current_year-1}-{current_year}"]
-
-    for code, league_key in FC_LEAGUES_TO_IMPORT.items():
+    # 👇 LA BOUCLE EST CORRIGÉE ICI
+    for code, league_info in FC_LEAGUES_TO_IMPORT.items():
         league_key = league_info["key"]
         seasons_to_try = league_info["seasons"]
         
@@ -2901,11 +2898,11 @@ async def run_fc_history_import():
                     
                     for m in matches:
                         try:
-                            # Extraction des champs (selon la structure de Football-Charts)
+                            # Extraction des champs
                             home = m.get("home_team") or m.get("homeTeam") or "?"
                             away = m.get("away_team") or m.get("awayTeam") or "?"
                             
-                            # 👇 CORRECTION ICI : Gestion des scores "2:1" ou "2-1"
+                            # Gestion des scores "2:1" ou "2-1"
                             ft = m.get("ft_result") or m.get("score", {})
                             hg = None
                             ag = None
@@ -2918,11 +2915,9 @@ async def run_fc_history_import():
                                 score_str = str(ft).replace("-", ":").strip()
                                 parts = score_str.split(":")
                                 if len(parts) >= 2:
-                                    # On s'assure que ce sont bien des nombres avant de convertir
                                     if parts[0].strip().isdigit() and parts[1].strip().isdigit():
                                         hg = int(parts[0].strip())
                                         ag = int(parts[1].strip())
-                            # 👆 FIN DE LA CORRECTION
 
                             if hg is None or ag is None:
                                 continue
@@ -2937,7 +2932,7 @@ async def run_fc_history_import():
                             slug = m.get("slug") or f"{league_key}-{home}-{away}-{kickoff[:10]}"
                             hash_obj = hashlib.md5(str(slug).encode())
                             numeric_hash = int(hash_obj.hexdigest(), 16) % (10**10)
-                            match_id = 4_000_000_000 + numeric_hash  # Offset différent pour ne pas collisionner
+                            match_id = 4_000_000_000 + numeric_hash
 
                             # Insertion dans PostgreSQL
                             c.execute("""
