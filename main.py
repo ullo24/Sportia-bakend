@@ -2899,16 +2899,24 @@ async def run_fc_history_import():
                             home = m.get("home_team") or m.get("homeTeam") or "?"
                             away = m.get("away_team") or m.get("awayTeam") or "?"
                             
-                            # Les scores peuvent être dans "ft_result" ou "score"
+                            # 👇 CORRECTION ICI : Gestion des scores "2:1" ou "2-1"
                             ft = m.get("ft_result") or m.get("score", {})
+                            hg = None
+                            ag = None
+                            
                             if isinstance(ft, dict):
                                 hg = ft.get("home") or ft.get("home_goals")
                                 ag = ft.get("away") or ft.get("away_goals")
                             else:
-                                # Si c'est une string "2-1"
-                                parts = str(ft).split("-")
-                                hg = int(parts[0].strip()) if len(parts) > 0 else None
-                                ag = int(parts[1].strip()) if len(parts) > 1 else None
+                                # L'API renvoie souvent le score avec deux-points (ex: "2:1")
+                                score_str = str(ft).replace("-", ":").strip()
+                                parts = score_str.split(":")
+                                if len(parts) >= 2:
+                                    # On s'assure que ce sont bien des nombres avant de convertir
+                                    if parts[0].strip().isdigit() and parts[1].strip().isdigit():
+                                        hg = int(parts[0].strip())
+                                        ag = int(parts[1].strip())
+                            # 👆 FIN DE LA CORRECTION
 
                             if hg is None or ag is None:
                                 continue
