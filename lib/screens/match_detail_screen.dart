@@ -519,19 +519,43 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
             ...standings.map<Widget>((s) {
               final isHome = s['team'] == m['home'];
               final gd = s['gd'] as int? ?? 0;
+              final teamLeague = s['league'] ?? ''; // 👈 On récupère le nom de la ligue
+              
               return Padding(
                 padding: const EdgeInsets.symmetric(vertical: 6),
                 child: Row(
                   children: [
                     SizedBox(width: 30, child: Text('${s['position']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
+                    
+                    // 👇 MODIFICATION ICI : On utilise une Column pour l'équipe et sa ligue
                     Expanded(
-                      child: Text(
-                        '${s['team']}', 
-                        style: TextStyle(fontSize: 13, fontWeight: isHome ? FontWeight.bold : FontWeight.normal),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${s['team']}', 
+                            style: TextStyle(
+                              fontSize: 13, 
+                              fontWeight: isHome ? FontWeight.bold : FontWeight.normal
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          // Si l'équipe vient d'une autre ligue (ex: Coupe d'Europe), on affiche la ligue en dessous
+                          if (teamLeague.isNotEmpty)
+                            Text(
+                              teamLeague, 
+                              style: TextStyle(
+                                fontSize: 9, 
+                                color: Colors.grey.shade600,
+                                fontStyle: FontStyle.italic
+                              ),
+                            ),
+                        ],
                       ),
                     ),
+                    // 👆 FIN DE LA MODIFICATION
+
                     SizedBox(width: 30, child: Text('${s['pts']}', textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
                     SizedBox(
                       width: 40, 
@@ -554,7 +578,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
       ),
     );
   }
-
+  
   Widget _buildGoalsSection(dynamic m) {
     return _section(
       title: 'MARCHÉS BUTS',
