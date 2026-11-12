@@ -26,11 +26,31 @@ if not API_KEY:
 FC_API_KEY = os.getenv("FC_API_KEY")
 FC_BASE_URL = "https://footballcharts-backend.onrender.com/api/v1"
 FC_LEAGUES = {
+    # --- Existantes ---
     "SAU": "saudi1",
     "JPN": "japan1",
     "KOR": "korea1",
+    # --- D2 (tier 1 : marchés principaux) ---
+    "CHA": "cha",              # Championship (England)
+    "BL2": "germany2",         # 2. Bundesliga
+    "SB":  "italy2",           # Serie B
+    "L2":  "france2",          # Ligue 2
+    "ED":  "holland2",         # Eerste Divisie (PAS netherlands2)
+    "P2":  "portugal2",        # Liga Portugal 2
+    "J2":  "japan2",           # J2 League
+    "B2":  "brazil2",          # Serie B (Brazil)
+    # --- D2 bonus (marchés solides) ---
+    "LL2": "spain2",           # LaLiga2
+    "KL2": "korea2",           # K League 2
+    # --- Féminines disponibles ---
+    "WSL": "wengland1",        # WSL (England)
+    "WF1": "wfrance1",         # Premiere Ligue Women (France)
+    "WBL": "wgermany1",        # Bundesliga Women (Germany)
+    # --- Afrique (marché Gabon) ---
+    "EGY": "egypt",            # Egyptian Premier League
+    "MAR": "morocco",          # Botola Pro
+    "ALG": "algir1",           # Ligue 1 (Algeria)
 }
-
 
 # ===== GOAL API CONFIG (Argentine + Chine) =====
 GOAL_API_KEY = os.getenv("GOAL_API_KEY")
@@ -82,7 +102,14 @@ COMPETITIONS = {
     "WC": "FIFA World Cup",
     "EC": "UEFA European Championship",
 }
-
+LEAGUES_AUTO_INCLUDE = {
+    "Champions League", "Europa League", "Conference League",
+    "Championship", "2. Bundesliga", "Serie B", "Ligue 2",
+    "Eerste Divisie", "Liga Portugal 2", "J2 League",
+    "Brasileirão Série B", "LaLiga2", "K League 2",
+    "Women's Super League", "Premiere Ligue Women", "Bundesliga Women",
+    "Egyptian Premier League", "Botola Pro", "Ligue 1 Algeria",
+}
 LEAGUE_AVG_GOALS = {
     "PL": 2.85, "PD": 2.65, "SA": 2.75, "BL1": 3.15, "FL1": 2.70,
     "DED": 3.20, "PPL": 2.55, "CL": 2.80, "EC": 2.60, "WC": 2.70,
@@ -92,6 +119,12 @@ LEAGUE_AVG_GOALS = {
     "MLS": 2.90,
     "WC": 2.60,
     "EC": 2.50,
+        # ... existant ...
+    "CHA": 2.60, "BL2": 2.95, "SB": 2.60, "L2": 2.55,
+    "ED": 3.10,  "P2": 2.50,  "J2": 2.55, "B2": 2.45,
+    "LL2": 2.45, "KL2": 2.50,
+    "WSL": 2.85, "WF1": 2.75, "WBL": 2.90,
+    "EGY": 2.40, "MAR": 2.20, "ALG": 2.30,
 }
 
 DAYS_AHEAD = 7
@@ -1099,9 +1132,15 @@ async def daily_pipeline():
         # === Football-Charts.com (SAU, JPN, KOR) ===
         for code, league_key in FC_LEAGUES.items():
             league_name = {
-                "SAU": "Saudi Pro League",
-                "JPN": "J1 League",
-                "KOR": "K League 1",
+                "SAU": "Saudi Pro League", "JPN": "J1 League", "KOR": "K League 1",
+                "CHA": "Championship", "BL2": "2. Bundesliga", "SB": "Serie B",
+                "L2": "Ligue 2", "ED": "Eerste Divisie", "P2": "Liga Portugal 2",
+                "J2": "J2 League", "B2": "Brasileirão Série B",
+                "LL2": "LaLiga2", "KL2": "K League 2",
+                "WSL": "Women's Super League", "WF1": "Premiere Ligue Women",
+                "WBL": "Bundesliga Women",
+                "EGY": "Egyptian Premier League", "MAR": "Botola Pro",
+                "ALG": "Ligue 1 Algeria",
             }.get(code, code)
             try:
                 fixtures = await fetch_footballcharts_fixtures(league_key, date_from, date_to)
@@ -1212,7 +1251,17 @@ async def daily_pipeline():
                 match_id = m["id"]
                 league = COMPETITIONS.get(code, ZAFRONIX_LEAGUES.get(code, "Unknown"))
                 if code in FC_LEAGUES:
-                    league = {"SAU": "Saudi Pro League", "JPN": "J1 League", "KOR": "K League 1"}.get(code, code)
+                    league_name = {
+                                    "SAU": "Saudi Pro League", "JPN": "J1 League", "KOR": "K League 1",
+                                    "CHA": "Championship", "BL2": "2. Bundesliga", "SB": "Serie B",
+                                    "L2": "Ligue 2", "ED": "Eerste Divisie", "P2": "Liga Portugal 2",
+                                    "J2": "J2 League", "B2": "Brasileirão Série B",
+                                    "LL2": "LaLiga2", "KL2": "K League 2",
+                                    "WSL": "Women's Super League", "WF1": "Premiere Ligue Women",
+                                    "WBL": "Bundesliga Women",
+                                    "EGY": "Egyptian Premier League", "MAR": "Botola Pro",
+                                    "ALG": "Ligue 1 Algeria",
+                    }.get(code, code)  
                 if code in GOAL_API_LEAGUES:
                     league = {
                         "ARG": "Liga Profesional Argentina", 
@@ -2487,7 +2536,7 @@ async def get_tickets_week():
         "Liga Profesional Argentina": "ARG",
         "Major League Soccer": "MLS",
     })
-
+    
     for r in rows:
         m = dict(r)
         status = m.get("status", "")
@@ -2498,7 +2547,7 @@ async def get_tickets_week():
         
         # 👇 LE BLOC MANQUANT EST ICI 👇
         # On inclut TOUTES les coupes d'Europe sans condition de Top Teams
-        if league_name in ["Champions League", "Europa League", "Conference League"]:
+        if league_name in LEAGUES_AUTO_INCLUDE:
             m["_code"] = league_name
             m["_home_top"] = True
             m["_away_top"] = True
@@ -2642,7 +2691,7 @@ async def get_tickets_week_value():
             continue
         league_name = m.get("league", "")
         
-        if league_name in ["Champions League", "Europa League", "Conference League"]:
+        if league_name in LEAGUES_AUTO_INCLUDE:
             m["_code"] = league_name
             eligible.append(m)
             continue
@@ -2946,6 +2995,27 @@ FC_LEAGUES_TO_IMPORT = {
     # --- Amériques ---
     "BRA": {"key": "brazil1", "seasons": ["2026", "2025"]},
     "MLS": {"key": "usa1", "seasons": ["2026", "2025"]},
+    # ... existant (JPN, KOR, CHN, SAU, BRA, MLS) ...
+    # --- D2 tier 1 ---
+    "CHA": {"key": "cha",        "seasons": ["2026-2027", "2025-2026"]},
+    "BL2": {"key": "germany2",   "seasons": ["2026-2027", "2025-2026"]},
+    "SB":  {"key": "italy2",     "seasons": ["2026-2027", "2025-2026"]},
+    "L2":  {"key": "france2",    "seasons": ["2026-2027", "2025-2026"]},
+    "ED":  {"key": "holland2",   "seasons": ["2026-2027", "2025-2026"]},
+    "P2":  {"key": "portugal2",  "seasons": ["2026-2027", "2025-2026"]},
+    "B2":  {"key": "brazil2",    "seasons": ["2026", "2025"]},
+    "J2":  {"key": "japan2",     "seasons": ["2025", "2024"]},  # ⚠️ 2026 indispo
+    # --- D2 bonus ---
+    "LL2": {"key": "spain2",     "seasons": ["2026-2027", "2025-2026"]},
+    "KL2": {"key": "korea2",     "seasons": ["2026", "2025"]},
+    # --- Féminines ---
+    "WSL": {"key": "wengland1",  "seasons": ["2026-2027", "2025-2026"]},
+    "WF1": {"key": "wfrance1",   "seasons": ["2026-2027", "2025-2026"]},
+    "WBL": {"key": "wgermany1",  "seasons": ["2026-2027", "2025-2026"]},
+    # --- Afrique ---
+    "EGY": {"key": "egypt",      "seasons": ["2026-2027", "2025-2026"]},
+    "MAR": {"key": "morocco",    "seasons": ["2026-2027", "2025-2026"]},
+    "ALG": {"key": "algir1",     "seasons": ["2026-2027", "2025-2026"]},
 }
 
 @app.post("/admin/import-history-fc")
