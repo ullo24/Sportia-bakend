@@ -1251,17 +1251,7 @@ async def daily_pipeline():
                 match_id = m["id"]
                 league = COMPETITIONS.get(code, ZAFRONIX_LEAGUES.get(code, "Unknown"))
                 if code in FC_LEAGUES:
-                    league_name = {
-                                    "SAU": "Saudi Pro League", "JPN": "J1 League", "KOR": "K League 1",
-                                    "CHA": "Championship", "BL2": "2. Bundesliga", "SB": "Serie B",
-                                    "L2": "Ligue 2", "ED": "Eerste Divisie", "P2": "Liga Portugal 2",
-                                    "J2": "J2 League", "B2": "Brasileirão Série B",
-                                    "LL2": "LaLiga2", "KL2": "K League 2",
-                                    "WSL": "Women's Super League", "WF1": "Premiere Ligue Women",
-                                    "WBL": "Bundesliga Women",
-                                    "EGY": "Egyptian Premier League", "MAR": "Botola Pro",
-                                    "ALG": "Ligue 1 Algeria",
-                    }.get(code, code)  
+                    league = FC_LEAGUE_DISPLAY_NAMES.get(code, code)  
                 if code in GOAL_API_LEAGUES:
                     league = {
                         "ARG": "Liga Profesional Argentina", 
@@ -3018,6 +3008,18 @@ FC_LEAGUES_TO_IMPORT = {
     "ALG": {"key": "algir1",     "seasons": ["2026-2027", "2025-2026"]},
 }
 
+FC_LEAGUE_DISPLAY_NAMES = {
+    "SAU": "Saudi Pro League", "JPN": "J1 League", "KOR": "K League 1",
+    "CHA": "Championship", "BL2": "2. Bundesliga", "SB": "Serie B",
+    "L2": "Ligue 2", "ED": "Eerste Divisie", "P2": "Liga Portugal 2",
+    "J2": "J2 League", "B2": "Brasileirão Série B",
+    "LL2": "LaLiga2", "KL2": "K League 2",
+    "WSL": "Women's Super League", "WF1": "Premiere Ligue Women",
+    "WBL": "Bundesliga Women",
+    "EGY": "Egyptian Premier League", "MAR": "Botola Pro",
+    "ALG": "Ligue 1 Algeria",
+}
+
 @app.post("/admin/import-history-fc")
 async def import_history_fc(background_tasks: BackgroundTasks):
     """Importe l'historique des ligues spécifiques via Football-Charts."""
@@ -3100,6 +3102,7 @@ async def run_fc_history_import():
                             match_id = 4_000_000_000 + numeric_hash
 
                             # Insertion dans PostgreSQL
+                            display_name = FC_LEAGUE_DISPLAY_NAMES.get(code, league_key)
                             c.execute("""
                                 INSERT INTO matches 
                                 (id, league, country, home, away, kickoff, status, home_goals, away_goals, updated_at)
@@ -3133,17 +3136,30 @@ async def fix_league_names():
         
         # Dictionnaire de correspondance (clé API -> Nom Propre)
         mapping = {
-            "japan1": "J1 League",
-            "korea1": "K League 1",
-            "china": "Chinese Super League",
-            "saudi1": "Saudi Pro League",
-            "brazil1": "Campeonato Brasileiro",
-            "usa1": "Major League Soccer"
+            # Anciennes
+            "japan1": "J1 League", "korea1": "K League 1",
+            "china": "Chinese Super League", "saudi1": "Saudi Pro League",
+            "brazil1": "Campeonato Brasileiro", "usa1": "Major League Soccer",
+            # Nouvelles D2
+            "cha": "Championship", "germany2": "2. Bundesliga",
+            "italy2": "Serie B", "france2": "Ligue 2",
+            "holland2": "Eerste Divisie", "portugal2": "Liga Portugal 2",
+            "japan2": "J2 League", "brazil2": "Brasileirão Série B",
+            "spain2": "LaLiga2", "korea2": "K League 2",
+            # Féminines
+            "wengland1": "Women's Super League",
+            "wfrance1": "Premiere Ligue Women",
+            "wgermany1": "Bundesliga Women",
+            # Afrique
+            "egypt": "Egyptian Premier League", "morocco": "Botola Pro",
+            "algir1": "Ligue 1 Algeria",
         }
         
         total_updated = 0
         for key, name in mapping.items():
             c.execute("UPDATE matches SET league = %s WHERE league = %s", (name, key))
+            total_updated += c.rowcount
+            c.execute("UPDATE matches SET league = %s WHERE league = %s", (name, key.upper()))
             total_updated += c.rowcount
             
         conn.commit()
