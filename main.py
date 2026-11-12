@@ -3082,3 +3082,10 @@ async def fix_league_names():
         return {"status": "success", "message": f"{total_updated} matchs mis à jour avec les bons noms de ligues."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+@app.get("/debug/fc-leagues")
+async def debug_fc_leagues():
+    headers = {"Authorization": f"Bearer {FC_API_KEY}"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(f"{FC_BASE_URL}/leagues/", headers=headers)
+        return r.json()
