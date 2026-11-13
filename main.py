@@ -497,18 +497,18 @@ def compute_stats_from_history(team_name: str, n_matches: int = 40, before_date:
     import math
     from datetime import datetime
 
-        stats = {
-        "matches_played": len(rows),
-        "points": 0,
-        "weight_sum": 0,
-        "weighted_gf": 0, "weighted_ga": 0,
-        "weighted_gf_home": 0, "weighted_ga_home": 0,
-        "weighted_gf_away": 0, "weighted_ga_away": 0,
-        # 👇 AJOUTE CES 2 LIGNES
-        "weight_sum_home": 0,
-        "weight_sum_away": 0,
-        "wins": 0, "draws": 0, "losses": 0,
-        "form_list": []
+    stats = {
+    "matches_played": len(rows),
+    "points": 0,
+    "weight_sum": 0,
+    "weighted_gf": 0, "weighted_ga": 0,
+    "weighted_gf_home": 0, "weighted_ga_home": 0,
+    "weighted_gf_away": 0, "weighted_ga_away": 0,
+    # 👇 AJOUTE CES 2 LIGNES
+    "weight_sum_home": 0,
+    "weight_sum_away": 0,
+    "wins": 0, "draws": 0, "losses": 0,
+    "form_list": []
     }
 
     # Demi-vie de 60 jours (un match de 60 jours compte 2x moins qu'un match d'aujourd'hui)
