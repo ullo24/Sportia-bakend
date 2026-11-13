@@ -3453,8 +3453,8 @@ def clear_cache(prefix: str = ""):
 @app.get("/admin/safe-backtest")
 def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50):
     """
-    Backteste le ticket safe sur les N derniers jours (matchs FINISHED).
-    Reconstruit le safe comme l'aurait fait /tickets/{day}, puis évalue chaque pick.
+    Backteste le ticket safe sur les N derniers jours.
+    Ignore les jours avec matchs sans score ou safes hors bornes.
     """
     today = date.today()
     total_days = 0
@@ -3505,7 +3505,6 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
             details.append({"date": day_str, "status": "no_safe"})
             continue
 
-        days_with_safe += 1
         safe_cote = _calc_total_cote(safe)
         joint = 1.0
         for p in safe:
@@ -3515,21 +3514,24 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
         match_map = {dict(r)["id"]: dict(r) for r in rows}
         pick_results = []
         all_won = True
+        has_unknown = False
+
         for p in safe:
             match = match_map.get(p["match_id"])
             if not match:
-                all_won = False
+                has_unknown = True
                 pick_results.append({
                     "match": f"{p['home']} vs {p['away']}",
                     "market": p["market"],
                     "result": "unknown",
+                    "reason": "Match introuvable",
                 })
                 continue
-                        ev = _evaluate_pick(p, match)
+
+            ev = _evaluate_pick(p, match)
+
             if ev["result"] == "pending":
-                # Pick non évaluable (score NULL, mi-temps manquante…)
-                # → on exclut tout le jour du calcul
-                all_won = None
+                has_unknown = True
                 pick_results.append({
                     "match": f"{p['home']} vs {p['away']}",
                     "market": p["market"],
@@ -3537,8 +3539,10 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
                     "reason": ev["reason"],
                 })
                 continue
+
             if ev["result"] != "won":
                 all_won = False
+
             pick_results.append({
                 "match": f"{p['home']} vs {p['away']}",
                 "market": p["market"],
@@ -3547,8 +3551,9 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
                 "result": ev["result"],
                 "score": ev["current_score"],
             })
-    # Si un pick est "unknown" ou si le safe est hors bornes → exclu du calcul
-        if all_won is None:
+
+        # Jour non évaluable (un pick pending) → exclu du calcul
+        if has_unknown:
             details.append({
                 "date": day_str,
                 "status": "unknown",
@@ -3556,9 +3561,9 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
                 "joint_prob": round(joint, 4),
                 "picks": pick_results,
             })
-            days_with_safe -= 1   # on retire du dénominateur
             continue
 
+        # Safe hors bornes (fallback appliqué) → exclu du calcul
         if not (min_cote <= safe_cote <= max_cote):
             details.append({
                 "date": day_str,
@@ -3568,9 +3573,10 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
                 "hors_bornes": True,
                 "picks": pick_results,
             })
-            days_with_safe -= 1   # idem : le safe n'aurait pas dû être publié
             continue
 
+        # Jour pleinement évaluable
+        days_with_safe += 1
         if all_won:
             safes_won += 1
         else:
@@ -3592,9 +3598,9 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
     if abs(ecart) < 10:
         calibration = "OK"
     elif ecart < 0:
-        calibration = "SURESTIME"   # le modèle promet plus qu'il ne tient
+        calibration = "SURESTIME"
     else:
-        calibration = "SOUSESTIME"  # le modèle est trop prudent
+        calibration = "SOUSESTIME"
 
     return {
         "period_days": days,
@@ -3611,7 +3617,6 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
         "max_cote": max_cote,
         "details": details,
     }
-
 @app.get("/debug/fc-leagues")
 async def debug_fc_leagues():
     headers = {"Authorization": f"Bearer {FC_API_KEY}"}
