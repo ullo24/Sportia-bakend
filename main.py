@@ -1884,32 +1884,34 @@ _SAFE_MARKETS = {
 }
 
 
-def _build_safe_ticket(all_picks, min_cote=1.80, max_cote=3.20):
+def _build_safe_ticket(all_picks, min_cote=1.60, max_cote=3.50):
     """
-    Safe ticket : maximise la probabilité jointe sur toutes les compétitions.
-    - Marchés safe uniquement, pick_proba >= 0.70
-    - 1 pick par match, 1 par ligue, 1 par groupe de marché
-    - Recherche exhaustive (2-4 picks) pour maximiser joint_prob
-    - Cote totale bornée entre min_cote et max_cote
+    Safe ticket : maximise la joint_prob sur toutes compétitions.
     """
     from itertools import combinations
 
-    candidates = [
-        p for p in all_picks
-        if p["market"] in _SAFE_MARKETS
-        and p["proba"] >= 0.70
-        and 1.10 <= p["cote"] <= 2.10
-    ]
-
-    # "1" et "2" uniquement si domination très claire
-    for p in all_picks:
-        if p["market"] in ("1", "2") and p["proba"] >= 0.78 and 1.10 <= p["cote"] <= 2.10:
-            candidates.append(p)
+    candidates = []
+    for min_proba_safe in [0.72, 0.68, 0.65, 0.62]:
+        temp = [
+            p for p in all_picks
+            if p["market"] in _SAFE_MARKETS
+            and p["proba"] >= min_proba_safe
+            and 1.10 <= p["cote"] <= 2.10
+        ]
+        for p in all_picks:
+            if (p["market"] in ("1", "2")
+                and p["proba"] >= min_proba_safe + 0.06
+                and 1.10 <= p["cote"] <= 2.10):
+                temp.append(p)
+        if len(temp) >= 4:
+            candidates = temp
+            break
+        if len(temp) > len(candidates):
+            candidates = temp
 
     if len(candidates) < 2:
         return []
 
-    # Meilleur pick par match (le plus probable)
     by_match = {}
     for p in candidates:
         mid = p["match_id"]
@@ -1920,7 +1922,6 @@ def _build_safe_ticket(all_picks, min_cote=1.80, max_cote=3.20):
     if len(candidates) < 2:
         return []
 
-    # Limite de recherche : top 25 par proba
     candidates.sort(key=lambda p: -p["proba"])
     candidates = candidates[:25]
 
@@ -1931,31 +1932,21 @@ def _build_safe_ticket(all_picks, min_cote=1.80, max_cote=3.20):
         if n > len(candidates):
             continue
         for combo in combinations(candidates, n):
-            leagues = set()
-            groups = set()
-            ok = True
-            for p in combo:
-                lg = p.get("league", "?")
-                gr = p.get("group", "other")
-                if lg in leagues or gr in groups:
-                    ok = False
-                    break
-                leagues.add(lg)
-                groups.add(gr)
-            if not ok:
-                continue
-
             total = _calc_total_cote(list(combo))
             if not (min_cote <= total <= max_cote):
                 continue
-
             joint = 1.0
             for p in combo:
                 joint *= p["proba"]
-
             if joint > best_joint:
                 best_joint = joint
                 best_combo = list(combo)
+
+    # 👇 Fallback — 4 espaces d'indentation, aligné avec le "for n in [4, 3, 2]:"
+    if not best_combo and candidates:
+        top2 = candidates[:2]
+        if len(top2) == 2:
+            return top2
 
     return best_combo or []
 
@@ -2470,7 +2461,7 @@ def get_tickets(day: str):
         safe = _build_safe_ticket(all_picks, min_cote=1.80, max_cote=3.20)
         safe_ids = {p["match_id"] for p in safe}
 
-        # === MEDIUM SHORT ===
+ # === MEDIUM SHORT ===
         medium_short_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
         medium_short = _build_ticket_optimized(
             medium_short_pool,
@@ -2483,7 +2474,7 @@ def get_tickets(day: str):
         )
         medium_short_ids = {p["match_id"] for p in medium_short}
 
-        # === MEDIUM LONG ===
+# === MEDIUM LONG ===
         medium_long_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
@@ -2500,23 +2491,29 @@ def get_tickets(day: str):
         )
         medium_long_ids = {p["match_id"] for p in medium_long}
 
-        # === RISKY ===
+# === RISKY === (adaptatif si peu de matchs disponibles)
         risky_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
             and p["match_id"] not in medium_short_ids
             and p["match_id"] not in medium_long_ids
         ]
-        risky = _build_ticket_optimized(
-            risky_pool,
-            target_cote=1000.0,
-            min_n=10, max_n=15,
-            min_proba=0.28,
-            max_per_market=4,
-            max_per_group=6,
-            # pas de max_per_league pour le risky (on veut tout)
-        )
 
+        risky_distinct = len(set(p["match_id"] for p in risky_pool))
+        if risky_distinct >= 4:
+            # Ajuster min_n au nombre réel de matchs dispo (min 4, max 10)
+            effective_min_n = min(10, risky_distinct)
+            risky = _build_ticket_optimized(
+                risky_pool,
+                target_cote=1000.0,
+                min_n=effective_min_n, max_n=15,
+                min_proba=0.28,
+                max_per_market=4,
+                max_per_group=6,
+            )
+        else:
+            risky = []
+            
         match_map = {dict(r)["id"]: dict(r) for r in rows}
 
         def enrich(picks):
