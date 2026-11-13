@@ -3525,7 +3525,18 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
                     "result": "unknown",
                 })
                 continue
-            ev = _evaluate_pick(p, match)
+                        ev = _evaluate_pick(p, match)
+            if ev["result"] == "pending":
+                # Pick non évaluable (score NULL, mi-temps manquante…)
+                # → on exclut tout le jour du calcul
+                all_won = None
+                pick_results.append({
+                    "match": f"{p['home']} vs {p['away']}",
+                    "market": p["market"],
+                    "result": "unknown",
+                    "reason": ev["reason"],
+                })
+                continue
             if ev["result"] != "won":
                 all_won = False
             pick_results.append({
@@ -3536,6 +3547,29 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
                 "result": ev["result"],
                 "score": ev["current_score"],
             })
+    # Si un pick est "unknown" ou si le safe est hors bornes → exclu du calcul
+        if all_won is None:
+            details.append({
+                "date": day_str,
+                "status": "unknown",
+                "safe_cote": safe_cote,
+                "joint_prob": round(joint, 4),
+                "picks": pick_results,
+            })
+            days_with_safe -= 1   # on retire du dénominateur
+            continue
+
+        if not (min_cote <= safe_cote <= max_cote):
+            details.append({
+                "date": day_str,
+                "status": "hors_bornes",
+                "safe_cote": safe_cote,
+                "joint_prob": round(joint, 4),
+                "hors_bornes": True,
+                "picks": pick_results,
+            })
+            days_with_safe -= 1   # idem : le safe n'aurait pas dû être publié
+            continue
 
         if all_won:
             safes_won += 1
@@ -3547,7 +3581,7 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
             "status": "won" if all_won else "lost",
             "safe_cote": safe_cote,
             "joint_prob": round(joint, 4),
-            "hors_bornes": not (min_cote <= safe_cote <= max_cote),
+            "hors_bornes": False,
             "picks": pick_results,
         })
 
