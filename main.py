@@ -334,80 +334,71 @@ def _clean_team_name(name: str) -> str:
     return cleaned.strip()
 
 
-async def _lookup_logo_thesportsdb(team_name: str) -> str:
+async def _lookup_logo_thesportsdb(team_name: str, client: httpx.AsyncClient = None) -> str:
     url = "https://www.thesportsdb.com/api/v1/json/3/searchteams.php"
     variants = [team_name, _clean_team_name(team_name)]
     seen = set()
     variants = [v for v in variants if v and not (v.lower() in seen or seen.add(v.lower()))]
 
-    for variant in variants:
-        try:
-            async with httpx.AsyncClient(timeout=8) as client:
+    own_client = client is None
+    if own_client:
+        client = httpx.AsyncClient(timeout=4)  # 👈 8s → 4s
+
+    try:
+        for variant in variants:
+            try:
                 r = await client.get(url, params={"t": variant})
                 if "application/json" not in r.headers.get("content-type", ""):
                     continue
                 data = r.json()
-                teams = data.get("teams") or []
-                for t in teams:
-                    team_logo = t.get("strTeamBadge") or t.get("strTeamLogo")
-                    if team_logo:
-                        return team_logo
-        except Exception as e:
-            print(f"Erreur logo {variant}: {e}")
+                for t in data.get("teams") or []:
+                    logo = t.get("strTeamBadge") or t.get("strTeamLogo")
+                    if logo:
+                        return logo
+            except Exception:
+                continue
+    finally:
+        if own_client:
+            await client.aclose()
     return ""
 
-
-async def get_team_logo(team_data: dict, force_lookup: bool = False) -> str:
+async def get_team_logo(team_data: dict, force_lookup: bool = False,
+                        client: httpx.AsyncClient = None,
+                        existing: dict = None) -> str:
     team_name = team_data.get("name") or team_data.get("shortName", "")
     if not team_name:
         return ""
 
-    # 1. Vérifier dans la base (avec curseur)
-    conn = db()
-    c = conn.cursor()
-    c.execute("SELECT logo FROM team_logos WHERE team=%s", (team_name,))
-    row = c.fetchone()
-    c.close()
-    conn.close()
-    
-    if row and row["logo"]:
-        return row["logo"]
+    # 1. Cache mémoire (passé depuis daily_pipeline)
+    if existing and team_name in existing and existing[team_name]:
+        return existing[team_name]
 
-    # 2. Utiliser le crest de l'API si disponible
+    # 2. Crest de l'API
     crest = team_data.get("crest")
     if crest and not force_lookup:
         if not crest.endswith('.svg'):
             crest = crest.rsplit('.', 1)[0] + '.svg'
-        
-        conn = db()
-        c = conn.cursor()
+        conn = db(); c = conn.cursor()
         c.execute(
             "INSERT INTO team_logos (team, logo) VALUES (%s, %s) "
             "ON CONFLICT (team) DO UPDATE SET logo = EXCLUDED.logo",
             (team_name, crest),
         )
-        conn.commit()
-        c.close()
-        conn.close()
+        conn.commit(); c.close(); conn.close()
         return crest
 
-    # 3. Chercher via TheSportsDB
-    logo = await _lookup_logo_thesportsdb(team_name)
+    # 3. TheSportsDB
+    logo = await _lookup_logo_thesportsdb(team_name, client=client)
     if logo:
-        conn = db()
-        c = conn.cursor()
+        conn = db(); c = conn.cursor()
         c.execute(
             "INSERT INTO team_logos (team, logo) VALUES (%s, %s) "
             "ON CONFLICT (team) DO UPDATE SET logo = EXCLUDED.logo",
             (team_name, logo),
         )
-        conn.commit()
-        c.close()
-        conn.close()
+        conn.commit(); c.close(); conn.close()
         return logo
-
     return ""
-
 # ===== MODELE POISSON =====
 
 def poisson_prob(k: int, lam: float) -> float:
@@ -1336,25 +1327,62 @@ async def daily_pipeline():
             except Exception as e:
                 print(f"Erreur stats {code}: {e}")
 
-        # === Logos ===
+# === Logos (parallélisé + batch) ===
         print("Recuperation des logos...")
-        logos = {}
+
+        # 1. Pré-charger TOUS les logos existants en UNE requête
+        conn = db(); c = conn.cursor()
+        c.execute("SELECT team, logo FROM team_logos")
+        existing_logos = {row["team"]: row["logo"] for row in c.fetchall()}
+        c.close(); conn.close()
+        print(f"{len(existing_logos)} logos déjà en cache DB")
+
+        # 2. Collecter les équipes à traiter (dédupliquées)
+        teams_to_fetch = {}
         for m in all_matches:
             try:
                 code = m.get("_code", "")
-                home_team = m["homeTeam"]
-                away_team = m["awayTeam"]
-                home_name = home_team.get("name") or home_team.get("shortName", "?")
-                away_name = away_team.get("name") or away_team.get("shortName", "?")
                 force = code in ["MLS", "SAU", "JPN", "KOR", "ARG", "CHN"]
-                if home_name not in logos:
-                    logos[home_name] = await get_team_logo(home_team, force_lookup=force)
-                if away_name not in logos:
-                    logos[away_name] = await get_team_logo(away_team, force_lookup=force)
-                await asyncio.sleep(0.5)
+                for team in [m["homeTeam"], m["awayTeam"]]:
+                    name = team.get("name") or team.get("shortName", "")
+                    if not name:
+                        continue
+                    if name in existing_logos and existing_logos[name]:
+                        continue  # déjà en cache
+                    if name in teams_to_fetch:
+                        continue  # déjà dans la file
+                    teams_to_fetch[name] = (team, force)
             except (KeyError, TypeError):
                 continue
-        print(str(len(logos)) + " logos recuperes")
+
+        print(f"{len(teams_to_fetch)} équipes à résoudre via TheSportsDB")
+
+        # 3. Résoudre en parallèle (10 concurrent max)
+        logos = {name: logo for name, logo in existing_logos.items() if logo}
+        if teams_to_fetch:
+            semaphore = asyncio.Semaphore(10)
+            async with httpx.AsyncClient(timeout=4) as shared_client:
+                async def worker(name, team, force):
+                    async with semaphore:
+                        logo = await get_team_logo(
+                            team, force_lookup=force,
+                            client=shared_client,
+                            existing=existing_logos,
+                        )
+                        return name, logo
+
+                tasks = [
+                    worker(name, team, force)
+                    for name, (team, force) in teams_to_fetch.items()
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, tuple):
+                        name, logo = r
+                        if logo:
+                            logos[name] = logo
+
+        print(f"{len(logos)} logos récupérés au total")
 
         # === Insertion en base ===
         conn = db()
@@ -3421,6 +3449,132 @@ def clear_cache(prefix: str = ""):
     c.close()
     conn.close()
     return {"status": "success", "deleted": deleted, "prefix": prefix or "(all)"}
+
+@app.get("/admin/safe-backtest")
+def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50):
+    """
+    Backteste le ticket safe sur les N derniers jours (matchs FINISHED).
+    Reconstruit le safe comme l'aurait fait /tickets/{day}, puis évalue chaque pick.
+    """
+    today = date.today()
+    total_days = 0
+    days_with_matches = 0
+    days_with_safe = 0
+    safes_won = 0
+    safes_lost = 0
+    joint_probs = []
+    details = []
+
+    for i in range(1, days + 1):
+        day_str = (today - timedelta(days=i)).isoformat()
+        total_days += 1
+
+        conn = db()
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s "
+            "AND status = 'FINISHED'",
+            (day_str,),
+        )
+        rows = c.fetchall()
+        c.close()
+        conn.close()
+
+        if not rows:
+            details.append({"date": day_str, "status": "no_matches"})
+            continue
+        days_with_matches += 1
+
+        all_picks = []
+        for r in rows:
+            m = dict(r)
+            try:
+                all_picks.extend(_all_picks_for_match(m))
+            except Exception:
+                continue
+
+        if len(all_picks) < 2:
+            details.append({"date": day_str, "status": "no_picks"})
+            continue
+
+        safe = _build_safe_ticket(all_picks, min_cote=min_cote, max_cote=max_cote)
+
+        if not safe:
+            details.append({"date": day_str, "status": "no_safe"})
+            continue
+
+        days_with_safe += 1
+        safe_cote = _calc_total_cote(safe)
+        joint = 1.0
+        for p in safe:
+            joint *= p["proba"]
+        joint_probs.append(joint)
+
+        match_map = {dict(r)["id"]: dict(r) for r in rows}
+        pick_results = []
+        all_won = True
+        for p in safe:
+            match = match_map.get(p["match_id"])
+            if not match:
+                all_won = False
+                pick_results.append({
+                    "match": f"{p['home']} vs {p['away']}",
+                    "market": p["market"],
+                    "result": "unknown",
+                })
+                continue
+            ev = _evaluate_pick(p, match)
+            if ev["result"] != "won":
+                all_won = False
+            pick_results.append({
+                "match": f"{p['home']} vs {p['away']}",
+                "market": p["market"],
+                "proba": p["proba"],
+                "cote": p["cote"],
+                "result": ev["result"],
+                "score": ev["current_score"],
+            })
+
+        if all_won:
+            safes_won += 1
+        else:
+            safes_lost += 1
+
+        details.append({
+            "date": day_str,
+            "status": "won" if all_won else "lost",
+            "safe_cote": safe_cote,
+            "joint_prob": round(joint, 4),
+            "hors_bornes": not (min_cote <= safe_cote <= max_cote),
+            "picks": pick_results,
+        })
+
+    taux_reel = (safes_won / days_with_safe) if days_with_safe > 0 else 0
+    joint_moy = (sum(joint_probs) / len(joint_probs)) if joint_probs else 0
+    ecart = (taux_reel - joint_moy) * 100
+
+    if abs(ecart) < 10:
+        calibration = "OK"
+    elif ecart < 0:
+        calibration = "SURESTIME"   # le modèle promet plus qu'il ne tient
+    else:
+        calibration = "SOUSESTIME"  # le modèle est trop prudent
+
+    return {
+        "period_days": days,
+        "days_analyzed": total_days,
+        "days_with_matches": days_with_matches,
+        "days_with_safe": days_with_safe,
+        "safes_won": safes_won,
+        "safes_lost": safes_lost,
+        "taux_reel_pct": round(taux_reel * 100, 2),
+        "joint_prob_moy_pct": round(joint_moy * 100, 2),
+        "ecart_pct": round(ecart, 2),
+        "calibration": calibration,
+        "min_cote": min_cote,
+        "max_cote": max_cote,
+        "details": details,
+    }
 
 @app.get("/debug/fc-leagues")
 async def debug_fc_leagues():
