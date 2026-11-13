@@ -1871,7 +1871,21 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
         if score < best_diff:
             best_diff = score
             best_combo = combo
-            
+        # 👇 Fallback : si aucun combo ne respecte les contraintes, prendre min_n picks
+    if not best_combo and filtered:
+        sorted_pool = sorted(filtered, key=lambda p: -p["proba"])
+        fallback = []
+        used_m = set()
+        for p in sorted_pool:
+            if p["match_id"] in used_m:
+                continue
+            fallback.append(p)
+            used_m.add(p["match_id"])
+            if len(fallback) >= min_n:
+                break
+        if fallback:
+            return fallback
+        
     return best_combo or []
 # ===== TICKET SAFE OPTIMISÉ (max joint prob) =====
 
@@ -1884,9 +1898,13 @@ _SAFE_MARKETS = {
 }
 
 
-def _build_safe_ticket(all_picks, min_cote=1.60, max_cote=3.50):
+def _build_safe_ticket(all_picks, min_cote=1.80, max_cote=3.50):
     """
-    Safe ticket : maximise la joint_prob sur toutes compétitions.
+    Safe ticket : maximise la joint_prob avec diversité.
+    - Seuil adaptatif (0.72 → 0.62)
+    - Cote par pick >= 1.30 (exclut les paris gratuits type H+1 D à 1.16)
+    - Max 2 picks par groupe de marché (pas 4x H+1 D)
+    - Max 1 pick par match
     """
     from itertools import combinations
 
@@ -1896,12 +1914,12 @@ def _build_safe_ticket(all_picks, min_cote=1.60, max_cote=3.50):
             p for p in all_picks
             if p["market"] in _SAFE_MARKETS
             and p["proba"] >= min_proba_safe
-            and 1.10 <= p["cote"] <= 2.10
+            and 1.30 <= p["cote"] <= 2.10      # 👈 1.10 → 1.30
         ]
         for p in all_picks:
             if (p["market"] in ("1", "2")
                 and p["proba"] >= min_proba_safe + 0.06
-                and 1.10 <= p["cote"] <= 2.10):
+                and 1.30 <= p["cote"] <= 2.10):
                 temp.append(p)
         if len(temp) >= 4:
             candidates = temp
@@ -1912,6 +1930,7 @@ def _build_safe_ticket(all_picks, min_cote=1.60, max_cote=3.50):
     if len(candidates) < 2:
         return []
 
+    # 1 pick par match (le plus probable)
     by_match = {}
     for p in candidates:
         mid = p["match_id"]
@@ -1935,6 +1954,19 @@ def _build_safe_ticket(all_picks, min_cote=1.60, max_cote=3.50):
             total = _calc_total_cote(list(combo))
             if not (min_cote <= total <= max_cote):
                 continue
+
+            # 👇 NEW : max 2 picks par groupe de marché
+            groups = {}
+            ok = True
+            for p in combo:
+                gr = p.get("group", "other")
+                groups[gr] = groups.get(gr, 0) + 1
+                if groups[gr] > 2:
+                    ok = False
+                    break
+            if not ok:
+                continue
+
             joint = 1.0
             for p in combo:
                 joint *= p["proba"]
@@ -1942,12 +1974,11 @@ def _build_safe_ticket(all_picks, min_cote=1.60, max_cote=3.50):
                 best_joint = joint
                 best_combo = list(combo)
 
-    # 👇 Fallback — 4 espaces d'indentation, aligné avec le "for n in [4, 3, 2]:"
+    # Fallback : si rien, prendre les 2 meilleurs
     if not best_combo and candidates:
         top2 = candidates[:2]
         if len(top2) == 2:
             return top2
-
     return best_combo or []
 
 def _summarize_ticket(picks):
