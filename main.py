@@ -497,13 +497,16 @@ def compute_stats_from_history(team_name: str, n_matches: int = 40, before_date:
     import math
     from datetime import datetime
 
-    stats = {
+        stats = {
         "matches_played": len(rows),
         "points": 0,
         "weight_sum": 0,
         "weighted_gf": 0, "weighted_ga": 0,
         "weighted_gf_home": 0, "weighted_ga_home": 0,
         "weighted_gf_away": 0, "weighted_ga_away": 0,
+        # 👇 AJOUTE CES 2 LIGNES
+        "weight_sum_home": 0,
+        "weight_sum_away": 0,
         "wins": 0, "draws": 0, "losses": 0,
         "form_list": []
     }
@@ -524,8 +527,12 @@ def compute_stats_from_history(team_name: str, n_matches: int = 40, before_date:
         
         weight = math.exp(-decay_rate * days_ago)
         stats["weight_sum"] += weight
-
         is_home = (r["home"] == team_name)
+        if is_home:
+            stats["weight_sum_home"] += weight
+        else:
+            stats["weight_sum_away"] += weight
+
         team_gf = r["home_goals"] if is_home else r["away_goals"]
         team_ga = r["away_goals"] if is_home else r["home_goals"]
         
@@ -576,33 +583,29 @@ def calc_expected_goals_v2e(league_code: str, home_team: str, away_team: str, be
     la_a = (base / 2.0) / _SQRT_HA
     K = 10.0
     
-    # 1. Calcul des moyennes pondérées (en utilisant weight_sum)
-    # Pour éviter la division par zéro si jamais
-    w_home = max(hs["weight_sum"], 0.1)
-    w_away = max(as_["weight_sum"], 0.1)
-    
-    # Attaque domicile de l'équipe A (buts pondérés / poids total)
-    att_home = hs["weighted_gf_home"] / w_home if hs["n_home"] > 0 else (hs["weighted_gf"] / w_home)
-    def_away = as_["weighted_ga_away"] / w_away if as_["n_away"] > 0 else (as_["weighted_ga"] / w_away)
-    
-    # Attaque extérieur de l'équipe B
-    att_away = as_["weighted_gf_away"] / w_away if as_["n_away"] > 0 else (as_["weighted_gf"] / w_away)
-    def_home = hs["weighted_ga_home"] / w_home if hs["n_home"] > 0 else (hs["weighted_ga"] / w_home)
-    
-    # 2. Application du Shrinkage Bayesien
-    att_home_shrunk = (att_home * hs["n_home"] + K * la_h) / (hs["n_home"] + K)
-    def_away_shrunk = (def_away * as_["n_away"] + K * la_h) / (as_["n_away"] + K)
-    att_away_shrunk = (att_away * as_["n_away"] + K * la_a) / (as_["n_away"] + K)
-    def_home_shrunk = (def_home * hs["n_home"] + K * la_a) / (hs["n_home"] + K)
+        # 1. Poids effectifs par zone (time decay)
+    w_home_h = max(hs["weight_sum_home"], 0.1)   # poids des matchs domicile de A
+    w_away_a = max(as_["weight_sum_away"], 0.1)   # poids des matchs extérieur de B
+    w_away_h = max(hs["weight_sum_away"], 0.1)   # poids des matchs extérieur de A
+    w_home_a = max(as_["weight_sum_home"], 0.1)   # poids des matchs domicile de B
 
+    # 2. Moyennes par match (dénominateur correct)
+    att_home = hs["weighted_gf_home"] / w_home_h if hs["n_home"] > 0 else (hs["weighted_gf"] / max(hs["weight_sum"], 0.1))
+    def_home = hs["weighted_ga_home"] / w_home_h if hs["n_home"] > 0 else (hs["weighted_ga"] / max(hs["weight_sum"], 0.1))
+    att_away = as_["weighted_gf_away"] / w_away_a if as_["n_away"] > 0 else (as_["weighted_gf"] / max(as_["weight_sum"], 0.1))
+    def_away = as_["weighted_ga_away"] / w_away_a if as_["n_away"] > 0 else (as_["weighted_ga"] / max(as_["weight_sum"], 0.1))
+
+    # 3. Shrinkage bayésien (utiliser les poids effectifs, pas n_home/n_away)
+    att_home_shrunk = (att_home * w_home_h + K * la_h) / (w_home_h + K)
+    def_away_shrunk = (def_away * w_away_a + K * la_h) / (w_away_a + K)
+    att_away_shrunk = (att_away * w_away_a + K * la_a) / (w_away_a + K)
+    def_home_shrunk = (def_home * w_home_h + K * la_a) / (w_home_h + K)
     # 3. Calcul final
     hx = (att_home_shrunk * def_away_shrunk) / la_h
     ax = (att_away_shrunk * def_home_shrunk) / la_a
     
     # 4. Forme
-    hx *= _form_factor(hs["form"] or "")
-    ax *= _form_factor(as_["form"] or "")
-    
+        
     # 5. Limites
     hx = max(0.6, min(3.0, round(hx, 2)))
     ax = max(0.6, min(3.0, round(ax, 2)))
