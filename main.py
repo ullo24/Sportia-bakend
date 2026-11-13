@@ -1806,7 +1806,6 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
     if not pool:
         return []
 
-    # 👈 1. Assouplissement : Accepter la CL même si proba < min_proba
     filtered = [p for p in pool if p["proba"] >= min_proba or p.get("league") == "Champions League"]
     
     if len(filtered) < min_n:
@@ -1820,13 +1819,12 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
     for n in range(min_n, min(max_n, len(filtered)) + 1):
         ideal_per_pick = target_cote ** (1.0 / n)
         
-        # 👈 2. Priorisation : Mettre la CL en premier dans le tri
         candidates = sorted(
             filtered,
             key=lambda p: (
-                p.get("league") != "Champions League",  # False (0) passe avant True (1)
-                abs(p["cote"] - ideal_per_pick), 
-                -p["proba"]
+                p.get("league") != "Champions League",
+                abs(p["cote"] - ideal_per_pick),
+                -p["proba"],
             )
         )
         
@@ -1834,47 +1832,30 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
         used_matches = set()
         market_count = {}
         group_count = {}
-        
+        league_count = {}           # ← doit être ICI, avant le for
         for p in candidates:
             if len(combo) >= n:
                 break
             if p["match_id"] in used_matches:
                 continue
+            
             mk = p["market"]
             if market_count.get(mk, 0) >= max_per_market:
                 continue
+            
             gr = p.get("group", "other")
             if group_count.get(gr, 0) >= max_per_group:
                 continue
-                combo = []
-                used_matches = set()
-                market_count = {}
-                group_count = {}
-                league_count = {}  # 👈 AJOUTE
-                for p in candidates:
-                    if len(combo) >= n:
-                        break
-                    if p["match_id"] in used_matches:
-                        continue
-                    mk = p["market"]
-                    if market_count.get(mk, 0) >= max_per_market:
-                        continue
-                    gr = p.get("group", "other")
-                    if group_count.get(gr, 0) >= max_per_group:
-                        continue
-                    lg = p.get("league", "?")          # 👈 AJOUTE
-                    if max_per_league and league_count.get(lg, 0) >= max_per_league:
-                        continue                         # 👈 AJOUTE
-                        
+            
+            lg = p.get("league", "?")
+            if max_per_league and league_count.get(lg, 0) >= max_per_league:
+                continue
+            
             combo.append(p)
             used_matches.add(p["match_id"])
             market_count[mk] = market_count.get(mk, 0) + 1
             group_count[gr] = group_count.get(gr, 0) + 1
-            league_count[lg] = league_count.get(lg, 0) + 1  # 👈 AJOUTE    
-            combo.append(p)
-            used_matches.add(p["match_id"])
-            market_count[mk] = market_count.get(mk, 0) + 1
-            group_count[gr] = group_count.get(gr, 0) + 1
+            league_count[lg] = league_count.get(lg, 0) + 1
             
         if len(combo) < min_n:
             continue
@@ -1892,7 +1873,6 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
             best_combo = combo
             
     return best_combo or []
-
 # ===== TICKET SAFE OPTIMISÉ (max joint prob) =====
 
 _SAFE_MARKETS = {
