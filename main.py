@@ -94,6 +94,31 @@ ZAFRONIX_LEAGUES = {
     "UNL": "UEFA Nations League",  # 👈 AJOUTE CETTE LIGNE
 }
 
+# ===== THE ODDS API CONFIG =====
+ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
+
+# Mapping ligue interne -> sport_key The Odds API
+ODDS_SPORT_KEYS = {
+    "Premier League": "soccer_epl",
+    "La Liga": "soccer_spain_la_liga",
+    "Serie A": "soccer_italy_serie_a",
+    "Bundesliga": "soccer_germany_bundesliga",
+    "Ligue 1": "soccer_france_ligue_one",
+    "Eredivisie": "soccer_netherlands_eredivisie",
+    "Primeira Liga": "soccer_portugal_primeira_liga",
+    "Championship": "soccer_efl_champ",
+    "LaLiga2": "soccer_spain_segunda_division",
+    "2. Bundesliga": "soccer_germany_bundesliga2",
+    "Serie B": "soccer_italy_serie_b",
+    "Ligue 2": "soccer_france_ligue_two",
+    "Champions League": "soccer_uefa_champs_league",
+    "Europa League": "soccer_uefa_europa_league",
+    "UEFA Nations League": "soccer_uefa_nations_league",
+    "Africa Cup of Nations Qualification": "soccer_africa_cup_of_nations_qualification",
+    "Major League Soccer": "soccer_usa_mls",
+}
+
 COMPETITIONS = {
     "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
     "BL1": "Bundesliga", "FL1": "Ligue 1", "DED": "Eredivisie",
@@ -247,6 +272,16 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_matches_away_kickoff ON matches(away, kickoff DESC)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status)")
     c.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS is_fallback INTEGER DEFAULT 0")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS match_odds (
+            match_id BIGINT,
+            market TEXT,
+            cote_bookmaker DOUBLE PRECISION,
+            bookmaker TEXT,
+            updated_at TIMESTAMP DEFAULT NOW(),
+            PRIMARY KEY (match_id, market, bookmaker)
+        )
+    """)
     conn.commit()
     c.close()
     conn.close()
@@ -1944,7 +1979,140 @@ _SAFE_MARKETS = {
     "Dom. marque", "Ext. marque",
 }
 
+async def fetch_and_store_odds(day: str):
+    """Récupère les cotes The Odds API pour les matchs du jour et les stocke."""
+    if not ODDS_API_KEY:
+        print("ODDS_API_KEY non définie, skip odds")
+        return 0
 
+    # Récupérer les matchs du jour + leurs ligues
+    conn = db(); c = conn.cursor()
+    c.execute(
+        "SELECT id, league, home, away FROM matches "
+        "WHERE SUBSTRING(kickoff, 1, 10) = %s AND status IN ('SCHEDULED','TIMED')",
+        (day,)
+    )
+    matches = c.fetchall()
+    c.close(); conn.close()
+
+    if not matches:
+        return 0
+
+    # Grouper par sport_key
+    by_sport = {}
+    for m in matches:
+        sport_key = ODDS_SPORT_KEYS.get(m["league"])
+        if not sport_key:
+            continue
+        by_sport.setdefault(sport_key, []).append(dict(m))
+
+    total_stored = 0
+    async with httpx.AsyncClient(timeout=20) as client:
+        for sport_key, sport_matches in by_sport.items():
+            try:
+                r = await client.get(
+                    f"{ODDS_BASE_URL}/sports/{sport_key}/odds",
+                    params={
+                        "apiKey": ODDS_API_KEY,
+                        "regions": "eu",
+                        "markets": "h2h,totals",
+                        "oddsFormat": "decimal",
+                        "dateFormat": "iso",
+                    }
+                )
+                if r.status_code != 200:
+                    print(f"Odds {sport_key}: HTTP {r.status_code}")
+                    continue
+                events = r.json()
+                total_stored += _store_odds_for_sport(events, sport_matches, sport_key)
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                print(f"Exception odds {sport_key}: {e}")
+
+    print(f"Odds: {total_stored} cotes stockées")
+    return total_stored
+
+
+def _normalize_team_name(name: str) -> str:
+    """Normalise un nom d'équipe pour le matching."""
+    n = name.lower()
+    for prefix in ["fc ", "ac ", "as ", "sc ", "cf ", "rc ", "cd ", "ca ",
+                   "club ", "deportivo ", "real ", "sporting "]:
+        if n.startswith(prefix):
+            n = n[len(prefix):]
+    return n.replace(" ", "").replace("-", "").replace(".", "").strip()
+
+
+def _store_odds_for_sport(events: list, internal_matches: list, sport_key: str) -> int:
+    """Associe les events The Odds API aux matchs internes et stocke les cotes."""
+    stored = 0
+
+    # Index des matchs internes par équipes normalisées
+    internal_index = {}
+    for m in internal_matches:
+        key = (
+            _normalize_team_name(m["home"]),
+            _normalize_team_name(m["away"]),
+        )
+        internal_index[key] = m["id"]
+
+    conn = db(); c = conn.cursor()
+    try:
+        for event in events:
+            home_norm = _normalize_team_name(event.get("home_team", ""))
+            away_norm = _normalize_team_name(event.get("away_team", ""))
+            match_id = internal_index.get((home_norm, away_norm))
+            if not match_id:
+                # Tentative inverse (certaines API inversent home/away)
+                match_id = internal_index.get((away_norm, home_norm))
+            if not match_id:
+                continue
+
+            bookmakers = event.get("bookmakers") or []
+            for bk in bookmakers:
+                bk_name = bk.get("title") or bk.get("key") or "?"
+                for market_data in bk.get("markets") or []:
+                    market_key = market_data.get("key")  # 'h2h' ou 'totals'
+                    outcomes = market_data.get("outcomes") or []
+
+                    for out in outcomes:
+                        name = out.get("name", "")
+                        price = out.get("price")
+                        point = out.get("point")  # pour totals
+                        if price is None:
+                            continue
+
+                        # Mapping vers nos marchés internes
+                        internal_market = None
+                        if market_key == "h2h":
+                            if name == event.get("home_team"):
+                                internal_market = "1"
+                            elif name == event.get("away_team"):
+                                internal_market = "2"
+                            elif name.lower() == "draw":
+                                internal_market = "X"
+                        elif market_key == "totals" and point == 2.5:
+                            if name.lower() == "over":
+                                internal_market = "+2.5"
+                            elif name.lower() == "under":
+                                internal_market = "-2.5"
+
+                        if not internal_market:
+                            continue
+
+                        c.execute("""
+                            INSERT INTO match_odds (match_id, market, cote_bookmaker, bookmaker, updated_at)
+                            VALUES (%s, %s, %s, %s, NOW())
+                            ON CONFLICT (match_id, market, bookmaker) DO UPDATE SET
+                                cote_bookmaker = EXCLUDED.cote_bookmaker,
+                                updated_at = NOW()
+                        """, (match_id, internal_market, price, bk_name))
+                        stored += 1
+    finally:
+        conn.commit(); c.close(); conn.close()
+
+    return stored
+    
 def _build_safe_ticket(all_picks, min_cote=2.0, max_cote=2.50):
     """
     Safe ticket : maximise la joint_prob avec diversité.
@@ -2028,22 +2196,122 @@ def _build_safe_ticket(all_picks, min_cote=2.0, max_cote=2.50):
             return top2
     return best_combo or []
 
+def _build_value_safe_ticket(all_picks, min_value=1.03, min_n=2, max_n=4, max_cote=4.00):
+    """
+    Construit un safe basé UNIQUEMENT sur des value bets réels.
+    value = proba_modele * cote_bookmaker
+    Ne garde que les picks où value >= min_value.
+    """
+    if not all_picks:
+        return []
+
+    # Récupérer toutes les cotes bookmaker pour les matchs concernés
+    match_ids = list({p["match_id"] for p in all_picks})
+    if not match_ids:
+        return []
+
+    conn = db(); c = conn.cursor()
+    placeholders = ",".join(["%s"] * len(match_ids))
+    c.execute(f"""
+        SELECT match_id, market, cote_bookmaker, bookmaker
+        FROM match_odds
+        WHERE match_id IN ({placeholders})
+    """, match_ids)
+    odds_rows = c.fetchall()
+    c.close(); conn.close()
+
+    # Construire un index (match_id, market) -> meilleure cote bookmaker
+    odds_index = {}
+    for row in odds_rows:
+        key = (row["match_id"], row["market"])
+        existing = odds_index.get(key)
+        if not existing or row["cote_bookmaker"] > existing["cote_bookmaker"]:
+            odds_index[key] = {
+                "cote_bookmaker": row["cote_bookmaker"],
+                "bookmaker": row["bookmaker"],
+            }
+
+    # Enrichir les picks avec les cotes réelles et calculer la value
+    value_picks = []
+    for p in all_picks:
+        key = (p["match_id"], p["market"])
+        odd = odds_index.get(key)
+        if not odd:
+            continue
+
+        cote_bk = odd["cote_bookmaker"]
+        value = p["proba"] * cote_bk
+
+        if value < min_value:
+            continue
+
+        enriched = dict(p)
+        enriched["cote_bookmaker"] = round(cote_bk, 2)
+        enriched["bookmaker"] = odd["bookmaker"]
+        enriched["value"] = round(value, 3)
+        value_picks.append(enriched)
+
+    if len(value_picks) < min_n:
+        return []
+
+    # Trier par value décroissante
+    value_picks.sort(key=lambda p: -p["value"])
+
+    # Prendre les meilleurs, 1 par match, sans dépasser max_cote
+    selected = []
+    used_matches = set()
+    for p in value_picks:
+        if p["match_id"] in used_matches:
+            continue
+        # Vérifier que la cote totale reste raisonnable
+        test_cote = 1.0
+        for sp in selected:
+            test_cote *= sp["cote_bookmaker"]
+        test_cote *= p["cote_bookmaker"]
+        if test_cote > max_cote:
+            continue
+
+        selected.append(p)
+        used_matches.add(p["match_id"])
+        if len(selected) >= max_n:
+            break
+
+    return selected if len(selected) >= min_n else []
+
 def _summarize_ticket(picks):
     if not picks:
-        return {"total_cote": 1.0, "count": 0,
-                "joint_prob": 0.0, "joint_prob_pct": 0.0, "picks": []}
-    total_cote = _calc_total_cote(picks)
+        return {"total_cote": 1.0, "total_cote_bookmaker": 1.0,
+                "count": 0, "joint_prob": 0.0, "joint_prob_pct": 0.0,
+                "avg_value": 0.0, "picks": []}
+
+    total_cote = 1.0
+    total_bk = 1.0
     joint = 1.0
+    total_value = 0.0
+    has_odds = 0
+
     for p in picks:
+        total_cote *= p["cote"]
         joint *= p["proba"]
+        if p.get("cote_bookmaker"):
+            total_bk *= p["cote_bookmaker"]
+            total_value += p.get("value", 1.0)
+            has_odds += 1
+        else:
+            total_bk *= p["cote"]  # fallback
+
+    avg_value = (total_value / has_odds) if has_odds else 0.0
+
     return {
-        "total_cote": total_cote,
+        "total_cote": round(total_cote, 2),
+        "total_cote_bookmaker": round(total_bk, 2),
         "count": len(picks),
         "joint_prob": round(joint, 6),
         "joint_prob_pct": round(joint * 100, 2),
+        "avg_value": round(avg_value, 3),
+        "has_real_odds": has_odds == len(picks),
         "picks": picks,
     }
-
 
 def _calc_risky_pick(m):
     hw = m.get("home_win") or 0
@@ -2505,6 +2773,8 @@ def get_leagues():
 @app.get("/tickets/{day}")
 def get_tickets(day: str):
     try:
+     # Récupérer les cotes bookmaker du jour
+        await fetch_and_store_odds(day)
         conn = db()
         
         # 👈 CORRECTION ICI : Utilisation du curseur
@@ -2535,10 +2805,12 @@ def get_tickets(day: str):
         def is_cl(p):
             return p.get("league") == "Champions League"
 
-                # === SAFE === (nouveau : maximise joint_prob, toutes compétitions)
-        safe = _build_safe_ticket(all_picks, min_cote=2.00, max_cote=2.5)
+                # === SAFE === (value bets réels)
+        safe = _build_value_safe_ticket(all_picks, min_value=1.03, min_n=2, max_n=4)
+        if not safe:
+            # Fallback : safe sans value mais avec cotes bookmaker affichées
+            safe = _build_safe_ticket(all_picks, min_cote=1.80, max_cote=3.50)
         safe_ids = {p["match_id"] for p in safe}
-
  # === MEDIUM SHORT ===
         medium_short_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
         medium_short = _build_ticket_optimized(
@@ -3669,6 +3941,11 @@ async def repredict_history(background_tasks: BackgroundTasks, limit: int = 0):
     background_tasks.add_task(run_repredict_history, limit)
     return {"status": "started", "message": "Vérifie les logs Render et GET /admin/repredict-status"}
 
+@app.post("/admin/fetch-odds")
+async def admin_fetch_odds(day: str = None):
+    target = day or date.today().isoformat()
+    n = await fetch_and_store_odds(target)
+    return {"date": target, "odds_stored": n}
 
 @app.get("/admin/repredict-status")
 def repredict_status():
