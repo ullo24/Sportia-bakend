@@ -1898,7 +1898,7 @@ _SAFE_MARKETS = {
 }
 
 
-def _build_safe_ticket(all_picks, min_cote=1.80, max_cote=3.50):
+def _build_safe_ticket(all_picks, min_cote=2.0, max_cote=2.50):
     """
     Safe ticket : maximise la joint_prob avec diversité.
     - Seuil adaptatif (0.72 → 0.62)
@@ -2489,7 +2489,7 @@ def get_tickets(day: str):
             return p.get("league") == "Champions League"
 
                 # === SAFE === (nouveau : maximise joint_prob, toutes compétitions)
-        safe = _build_safe_ticket(all_picks, min_cote=1.80, max_cote=3.20)
+        safe = _build_safe_ticket(all_picks, min_cote=2.00, max_cote=2.5)
         safe_ids = {p["match_id"] for p in safe}
 
  # === MEDIUM SHORT ===
