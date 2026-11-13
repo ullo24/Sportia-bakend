@@ -246,6 +246,7 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_matches_home_kickoff ON matches(home, kickoff DESC)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_matches_away_kickoff ON matches(away, kickoff DESC)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status)")
+    c.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS is_fallback INTEGER DEFAULT 0")
     conn.commit()
     c.close()
     conn.close()
@@ -3513,6 +3514,7 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
             "AND status = 'FINISHED' "
             "AND home_goals IS NOT NULL "
             "AND away_goals IS NOT NULL",
+            "AND is_fallback = 0 ",
             (day_str,),
         )
         rows = c.fetchall()
@@ -3701,8 +3703,12 @@ async def run_repredict_history(limit: int = 0):
             league_name = r["league"] or ""
             code = LEAGUE_NAME_TO_CODE.get(league_name, "")
             before_date = r["kickoff"]
-
+            
+            
             hx, ax = calc_expected_goals_v2e(code, r["home"], r["away"], before_date=before_date)
+            base = LEAGUE_AVG_GOALS.get(code, 2.7)
+            fallback_h = round((base / 2.0) * _SQRT_HA, 2)
+            is_fallback = 1 if hx == fallback_h else 0
             pred = predict_all_markets(hx, ax)
             ext = predict_extended_markets(
                 hx, ax,
@@ -3724,7 +3730,7 @@ async def run_repredict_history(limit: int = 0):
                     handicap_home_minus2=%s, handicap_away_minus2=%s,
                     first_half_over_15=%s, exact_scores=%s,
                     home_scores=%s, away_scores=%s,
-                    home_xg=%s, away_xg=%s, total_xg=%s, confidence=%s
+                    home_xg=%s, away_xg=%s, total_xg=%s, confidence=%s, is_fallback=%s
                 WHERE id=%s
             """, (
                 pred["home_win"], pred["draw"], pred["away_win"],
@@ -3739,7 +3745,7 @@ async def run_repredict_history(limit: int = 0):
                 ext["handicap_home_minus2"], ext["handicap_away_minus2"],
                 ext["first_half_over_15"], ext["exact_scores"],
                 ext["home_scores"], ext["away_scores"],
-                pred["home_xg"], pred["away_xg"], pred["total_xg"], pred["confidence"],
+                pred["home_xg"], pred["away_xg"], pred["total_xg"], pred["confidence"], int(is_fallback),
                 r["id"],
             ))
             conn.commit(); c.close(); conn.close()
