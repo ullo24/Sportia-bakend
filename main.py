@@ -242,6 +242,10 @@ def init_db():
         )
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_api_cache_expires ON api_cache(expires_at)")
+# Index pour les requêtes as-of (compute_stats_from_history + backtest)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_matches_home_kickoff ON matches(home, kickoff DESC)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_matches_away_kickoff ON matches(away, kickoff DESC)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status)")
     conn.commit()
     c.close()
     conn.close()
@@ -422,19 +426,30 @@ def _form_factor(form_str):
     r = (w * 3 + d) / (t * 3) if t * 3 > 0 else 0.5
     return 0.90 + (r * 0.20)
 
-def compute_stats_from_history(team_name: str, n_matches: int = 40) -> dict:
-    """Calcule les vraies stats pondérées par le temps (Time Decay)."""
+def compute_stats_from_history(team_name: str, n_matches: int = 40, before_date: str = None) -> dict:
+    """Calcule les stats pondérées. Si before_date fourni, ignore les matchs postérieurs."""
     conn = db()
     c = conn.cursor()
     
-    c.execute("""
-        SELECT home, away, home_goals, away_goals, kickoff 
-        FROM matches 
-        WHERE (home = %s OR away = %s) AND status = 'FINISHED'
-        AND home_goals IS NOT NULL 
-        AND away_goals IS NOT NULL
-        ORDER BY kickoff DESC LIMIT %s
-    """, (team_name, team_name, n_matches))
+    if before_date:
+        c.execute("""
+            SELECT home, away, home_goals, away_goals, kickoff 
+            FROM matches 
+            WHERE (home = %s OR away = %s) AND status = 'FINISHED'
+            AND home_goals IS NOT NULL 
+            AND away_goals IS NOT NULL
+            AND kickoff < %s
+            ORDER BY kickoff DESC LIMIT %s
+        """, (team_name, team_name, before_date, n_matches))
+    else:
+        c.execute("""
+            SELECT home, away, home_goals, away_goals, kickoff 
+            FROM matches 
+            WHERE (home = %s OR away = %s) AND status = 'FINISHED'
+            AND home_goals IS NOT NULL 
+            AND away_goals IS NOT NULL
+            ORDER BY kickoff DESC LIMIT %s
+        """, (team_name, team_name, n_matches))
     
     rows = c.fetchall()
     c.close()
@@ -461,8 +476,10 @@ def compute_stats_from_history(team_name: str, n_matches: int = 40) -> dict:
     HALF_LIFE_DAYS = 60.0
     decay_rate = math.log(2) / HALF_LIFE_DAYS
 
-    now = datetime.now()
-
+    if before_date:
+        now = datetime.fromisoformat(before_date.replace("Z", "+00:00")).replace(tzinfo=None)
+    else:
+        now = datetime.now()
     for r in rows:
         # Calcul du poids en fonction de l'âge du match
         match_date = datetime.fromisoformat(r["kickoff"].replace("Z", "+00:00")).replace(tzinfo=None)
@@ -508,13 +525,14 @@ def compute_stats_from_history(team_name: str, n_matches: int = 40) -> dict:
 
     return stats
 
-def calc_expected_goals_v2e(league_code: str, home_team: str, away_team: str):
-    """v2e : Poisson + Dixon-Coles + Shrinkage + Time Decay."""
+def calc_expected_goals_v2e(league_code: str, home_team: str, away_team: str, before_date: str = None):
+    """v2e : Poisson + Dixon-Coles + Shrinkage + Time Decay. As-of si before_date fourni."""
     base = LEAGUE_AVG_GOALS.get(league_code, 2.7)
     
-    hs = compute_stats_from_history(home_team)
-    as_ = compute_stats_from_history(away_team)
+    hs = compute_stats_from_history(home_team, before_date=before_date)
+    as_ = compute_stats_from_history(away_team, before_date=before_date)
     
+    # ... le reste de la fonction ne change PAS    
     if (not hs or not as_ or hs["matches_played"] < 3 or as_["matches_played"] < 3):
         return ((base / 2.0) * _SQRT_HA, (base / 2.0) / _SQRT_HA)
 
@@ -3270,6 +3288,25 @@ FC_LEAGUE_DISPLAY_NAMES = {
     "ALG": "Ligue 1 Algeria",
 }
 
+# ===== MAPPING NOM DE LIGUE EN BASE → CODE (pour le backtest) =====
+LEAGUE_NAME_TO_CODE = {v: k for k, v in COMPETITIONS.items()}
+LEAGUE_NAME_TO_CODE.update({v: k for k, v in ZAFRONIX_LEAGUES.items()})
+LEAGUE_NAME_TO_CODE.update({v: k for k, v in FC_LEAGUE_DISPLAY_NAMES.items()})
+# Alias manuels (noms en base qui diffèrent du dict)
+LEAGUE_NAME_TO_CODE.update({
+    "Campeonato Brasileiro": "BSA",
+    "Brasileirão Série B": "B2",
+    "Liga Profesional Argentina": "ARG",
+    "Chinese Super League": "CHN",
+    "Major League Soccer": "MLS",
+    "Africa Cup of Nations": "AFCON",
+    "Africa Cup of Nations Qualification": "AFCON_Q",
+    "UEFA Nations League": "UNL",
+    "Europa League": "EL",
+    "Conference League": "UECL",
+    "Champions League": "CL",
+})
+
 @app.post("/admin/import-history-fc")
 async def import_history_fc(background_tasks: BackgroundTasks):
     """Importe l'historique des ligues spécifiques via Football-Charts."""
@@ -3617,6 +3654,108 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
         "max_cote": max_cote,
         "details": details,
     }
+
+# ===== RE-PRÉDICTION HISTORIQUE (AS-OF) =====
+_REPREDICT_STATUS = {"running": False, "done": 0, "total": 0, "errors": 0, "started_at": None}
+
+
+@app.post("/admin/repredict-history")
+async def repredict_history(background_tasks: BackgroundTasks, limit: int = 0):
+    """Recalcule les prédictions sur les matchs FINISHED sans probas, en mode as-of."""
+    if _REPREDICT_STATUS.get("running"):
+        return {"status": "already_running", "progress": _REPREDICT_STATUS}
+    background_tasks.add_task(run_repredict_history, limit)
+    return {"status": "started", "message": "Vérifie les logs Render et GET /admin/repredict-status"}
+
+
+@app.get("/admin/repredict-status")
+def repredict_status():
+    return _REPREDICT_STATUS
+
+
+async def run_repredict_history(limit: int = 0):
+    global _REPREDICT_STATUS
+    _REPREDICT_STATUS = {
+        "running": True, "done": 0, "total": 0, "errors": 0,
+        "started_at": datetime.now().isoformat(),
+    }
+
+    conn = db()
+    c = conn.cursor()
+    q = ("SELECT id, league, home, away, kickoff FROM matches "
+         "WHERE status = 'FINISHED' "
+         "AND home_goals IS NOT NULL AND away_goals IS NOT NULL "
+         "AND home_win IS NULL "
+         "ORDER BY kickoff ASC")
+    if limit > 0:
+        q += f" LIMIT {int(limit)}"
+    c.execute(q)
+    rows = c.fetchall()
+    c.close(); conn.close()
+
+    _REPREDICT_STATUS["total"] = len(rows)
+    print(f"=== Re-prédiction as-of de {len(rows)} matchs ===")
+
+    for idx, r in enumerate(rows):
+        try:
+            league_name = r["league"] or ""
+            code = LEAGUE_NAME_TO_CODE.get(league_name, "")
+            before_date = r["kickoff"]
+
+            hx, ax = calc_expected_goals_v2e(code, r["home"], r["away"], before_date=before_date)
+            pred = predict_all_markets(hx, ax)
+            ext = predict_extended_markets(
+                hx, ax,
+                pred["home_win"], pred["draw"], pred["away_win"]
+            )
+
+            conn = db(); c = conn.cursor()
+            c.execute("""
+                UPDATE matches SET
+                    home_win=%s, draw=%s, away_win=%s,
+                    over_15=%s, under_15=%s, over_25=%s, under_25=%s,
+                    over_35=%s, under_35=%s, over_45=%s, under_45=%s,
+                    btts_yes=%s, btts_no=%s, first_half_goal=%s,
+                    handicap_home_1=%s, handicap_away_1=%s,
+                    dc_1x=%s, dc_12=%s, dc_x2=%s, dnb_home=%s, dnb_away=%s,
+                    over_05=%s, under_05=%s, btts_over_25=%s, btts_under_35=%s,
+                    handicap_home_minus1=%s, handicap_away_minus1=%s,
+                    handicap_home_plus1=%s, handicap_away_plus1=%s,
+                    handicap_home_minus2=%s, handicap_away_minus2=%s,
+                    first_half_over_15=%s, exact_scores=%s,
+                    home_scores=%s, away_scores=%s,
+                    home_xg=%s, away_xg=%s, total_xg=%s, confidence=%s
+                WHERE id=%s
+            """, (
+                pred["home_win"], pred["draw"], pred["away_win"],
+                pred["over_15"], pred["under_15"], pred["over_25"], pred["under_25"],
+                pred["over_35"], pred["under_35"], pred["over_45"], pred["under_45"],
+                pred["btts_yes"], pred["btts_no"], pred["first_half_goal"],
+                pred["handicap_home_1"], pred["handicap_away_1"],
+                ext["dc_1x"], ext["dc_12"], ext["dc_x2"], ext["dnb_home"], ext["dnb_away"],
+                ext["over_05"], ext["under_05"], ext["btts_over_25"], ext["btts_under_35"],
+                ext["handicap_home_minus1"], ext["handicap_away_minus1"],
+                ext["handicap_home_plus1"], ext["handicap_away_plus1"],
+                ext["handicap_home_minus2"], ext["handicap_away_minus2"],
+                ext["first_half_over_15"], ext["exact_scores"],
+                ext["home_scores"], ext["away_scores"],
+                pred["home_xg"], pred["away_xg"], pred["total_xg"], pred["confidence"],
+                r["id"],
+            ))
+            conn.commit(); c.close(); conn.close()
+
+            _REPREDICT_STATUS["done"] += 1
+            if (idx + 1) % 500 == 0:
+                print(f"  {idx + 1}/{len(rows)} matchs traités...")
+        except Exception as e:
+            _REPREDICT_STATUS["errors"] += 1
+            if _REPREDICT_STATUS["errors"] <= 10:
+                print(f"Erreur match {r.get('id')}: {e}")
+
+    _REPREDICT_STATUS["running"] = False
+    _REPREDICT_STATUS["finished_at"] = datetime.now().isoformat()
+    print(f"=== Re-prédiction terminée : {_REPREDICT_STATUS['done']} OK, {_REPREDICT_STATUS['errors']} erreurs ===")
+    
 @app.get("/debug/fc-leagues")
 async def debug_fc_leagues():
     headers = {"Authorization": f"Bearer {FC_API_KEY}"}
