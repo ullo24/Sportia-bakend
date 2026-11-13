@@ -2773,8 +2773,6 @@ def get_leagues():
 @app.get("/tickets/{day}")
 async def get_tickets(day: str):
     try:
-     # Récupérer les cotes bookmaker du jour
-        await fetch_and_store_odds(day)
         conn = db()
         
         # 👈 CORRECTION ICI : Utilisation du curseur
