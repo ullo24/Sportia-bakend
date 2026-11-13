@@ -3473,7 +3473,9 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
         c = conn.cursor()
         c.execute(
             "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s "
-            "AND status = 'FINISHED'",
+            "AND status = 'FINISHED' "
+            "AND home_goals IS NOT NULL "
+            "AND away_goals IS NOT NULL",
             (day_str,),
         )
         rows = c.fetchall()
