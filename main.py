@@ -233,6 +233,15 @@ def init_db():
             PRIMARY KEY (team, league)
         )
     """)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS api_cache (
+        cache_key TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        cached_at TIMESTAMP DEFAULT NOW(),
+        expires_at TIMESTAMP NOT NULL
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_api_cache_expires ON api_cache(expires_at)")
     conn.commit()
     c.close()
     conn.close()
@@ -241,6 +250,48 @@ def db():
     # On utilise RealDictCursor pour que les résultats se comportent comme des dictionnaires
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
     return conn
+
+def cache_get(key: str):
+    """Retourne les données si présentes et non expirées, sinon None."""
+    conn = db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT data FROM api_cache WHERE cache_key = %s AND expires_at > NOW()",
+        (key,)
+    )
+    row = c.fetchone()
+    c.close()
+    conn.close()
+    if row:
+        try:
+            return json.loads(row["data"])
+        except Exception:
+            return None
+    return None
+
+
+def cache_set(key: str, data, ttl_hours: float = 6.0):
+    """Stocke data avec un TTL en heures. Purge les entrées expirées au passage."""
+    from datetime import datetime, timedelta
+    expires = datetime.now() + timedelta(hours=ttl_hours)
+    conn = db()
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO api_cache (cache_key, data, cached_at, expires_at)
+        VALUES (%s, %s, NOW(), %s)
+        ON CONFLICT (cache_key) DO UPDATE SET
+            data = EXCLUDED.data,
+            cached_at = EXCLUDED.cached_at,
+            expires_at = EXCLUDED.expires_at
+        """,
+        (key, json.dumps(data, ensure_ascii=False), expires)
+    )
+    # Nettoyage léger : purge les entrées expirées depuis >1 jour
+    c.execute("DELETE FROM api_cache WHERE expires_at < NOW() - INTERVAL '1 day'")
+    conn.commit()
+    c.close()
+    conn.close()
 
 def increment_count():
     today = date.today().isoformat()
@@ -694,15 +745,30 @@ def generate_analysis(match: dict) -> str:
 # ===== FOOTBALL-CHARTS FETCH =====
 
 async def fetch_footballcharts_fixtures(league_key: str, date_from: str, date_to: str):
-    """Récupère les fixtures via football-charts.com (clé 'matches' dans la réponse)."""
     season = date.today().year
     if date.today().month < 7:
         season -= 1
+
+    cache_key = f"fc:fixtures:{league_key}:{season}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        filtered = []
+        for f in cached:
+            kickoff = (
+                f.get("match_date") or f.get("kickoff_utc") or f.get("kickoff")
+                or f.get("date") or f.get("datetime")
+            )
+            if kickoff and isinstance(kickoff, str) and date_from <= kickoff[:10] <= date_to:
+                filtered.append(f)
+        print(f"Football-Charts {league_key}: {len(cached)} en cache, {len(filtered)} dans la fenetre")
+        return filtered
+
     url = f"{FC_BASE_URL}/leagues/{league_key}/fixtures/"
     params = {"season": season}
     headers = {}
     if FC_API_KEY:
         headers["Authorization"] = f"Bearer {FC_API_KEY}"
+
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.get(url, headers=headers, params=params)
@@ -710,16 +776,23 @@ async def fetch_footballcharts_fixtures(league_key: str, date_from: str, date_to
                 print(f"Erreur Football-Charts {league_key}: HTTP {r.status_code} - {r.text[:200]}")
                 return []
             data = r.json()
-            # ✅ CORRECTION : les fixtures sont dans data["matches"]
+
             fixtures = []
             if isinstance(data, dict):
                 fixtures = data.get("matches") or data.get("fixtures") or data.get("data") or []
             elif isinstance(data, list):
                 fixtures = data
+
             if not fixtures:
                 note = data.get("note") if isinstance(data, dict) else None
                 print(f"Football-Charts {league_key}: aucun match ({note or 'liste vide'})")
+                # On met quand même en cache le "vide" pour économiser les appels
+                cache_set(cache_key, [], ttl_hours=3)
                 return []
+
+            # Cache avant filtre (on garde la liste complète)
+            cache_set(cache_key, fixtures, ttl_hours=6)
+
             filtered = []
             for f in fixtures:
                 kickoff = (
@@ -727,8 +800,7 @@ async def fetch_footballcharts_fixtures(league_key: str, date_from: str, date_to
                     or f.get("date") or f.get("datetime")
                 )
                 if kickoff and isinstance(kickoff, str):
-                    d = kickoff[:10]
-                    if date_from <= d <= date_to:
+                    if date_from <= kickoff[:10] <= date_to:
                         filtered.append(f)
             print(f"Football-Charts {league_key}: {len(fixtures)} bruts, {len(filtered)} dans la fenetre")
             return filtered
@@ -780,38 +852,72 @@ def convert_footballcharts_to_internal(fixtures: list, league_code: str, league_
 
 async def fetch_goal_api_fixtures(league_id: str, date_from: str, date_to: str):
     if not GOAL_API_KEY:
-        print("GOAL_API_KEY non definie")
         return []
+
+    cache_key = f"goal:fixtures:{league_id}"
+
+    # --- CACHE HIT ---
+    cached = cache_get(cache_key)
+    if cached is not None:
+        filtered = []
+        for f in cached:
+            kickoff = f.get("kickoffUtc") or f.get("matchDate")
+            if kickoff and isinstance(kickoff, str) and date_from <= kickoff[:10] <= date_to:
+                filtered.append(f)
+        print(f"GOAL API {league_id}: {len(cached)} en cache, {len(filtered)} dans la fenetre")
+        return filtered
+
+    # --- FETCH (pagination) ---
     url = f"{GOAL_API_BASE_URL}/leagues/{league_id}/fixtures"
     headers = {"Authorization": f"Bearer {GOAL_API_KEY}"}
+    all_fixtures = []
+    offset = 0
+    limit = 50
+    max_iterations = 10
+
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(url, headers=headers)
-            if r.status_code != 200:
-                print(f"Erreur GOAL API {league_id}: HTTP {r.status_code} - {r.text[:200]}")
-                return []
-            data = r.json()
-            if not data.get("success"):
-                print(f"Erreur GOAL API {league_id}: {data.get('message', 'unknown')}")
-                return []
-            fixtures = data.get("data", [])
-            if isinstance(fixtures, dict):
-                fixtures = fixtures.get("fixtures", [])
-            filtered = []
-            for f in fixtures:
-                kickoff = f.get("kickoffUtc") or f.get("matchDate")
-                if kickoff and isinstance(kickoff, str):
-                    d = kickoff[:10]
-                    if date_from <= d <= date_to:
-                        filtered.append(f)
-                else:
-                    filtered.append(f)
-            print(f"GOAL API {league_id}: {len(fixtures)} bruts, {len(filtered)} dans la fenetre")
-            return filtered
+            for _ in range(max_iterations):
+                params = {"limit": limit, "offset": offset}
+                r = await client.get(url, headers=headers, params=params)
+                if r.status_code != 200:
+                    print(f"Erreur GOAL API {league_id} (offset={offset}): HTTP {r.status_code}")
+                    break
+                data = r.json()
+                if not data.get("success"):
+                    print(f"Erreur GOAL API {league_id}: {data.get('message', 'unknown')}")
+                    break
+                fixtures = data.get("data", [])
+                if isinstance(fixtures, dict):
+                    fixtures = fixtures.get("fixtures", [])
+                if not fixtures:
+                    break
+                all_fixtures.extend(fixtures)
+                pagination = data.get("pagination") or {}
+                if not pagination.get("hasMore", False):
+                    break
+                offset += limit
+                await asyncio.sleep(0.3)
     except Exception as e:
         print(f"Exception GOAL API {league_id}: {e}")
         return []
 
+    # --- MISE EN CACHE (seulement si succès) ---
+    if all_fixtures:
+        cache_set(cache_key, all_fixtures, ttl_hours=6)
+
+    # --- FILTRE ---
+    filtered = []
+    for f in all_fixtures:
+        kickoff = f.get("kickoffUtc") or f.get("matchDate")
+        if kickoff and isinstance(kickoff, str):
+            if date_from <= kickoff[:10] <= date_to:
+                filtered.append(f)
+        else:
+            filtered.append(f)
+
+    print(f"GOAL API {league_id}: {len(all_fixtures)} bruts (toutes pages), {len(filtered)} dans la fenetre")
+    return filtered
 
 def convert_goal_api_to_internal(fixtures: list, league_code: str, league_name: str) -> list:
     """Convertit le format GOAL API vers le format interne."""
@@ -870,6 +976,12 @@ def convert_goal_api_to_internal(fixtures: list, league_code: str, league_name: 
 # ===== PIPELINE =====
 
 async def fetch_competition_matches(code: str, date_from: str, date_to: str):
+    cache_key = f"fdo:matches:{code}:{date_from}:{date_to}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        print(f"FD {code}: {len(cached)} matchs en cache")
+        return cached
+
     url = BASE_URL + "/competitions/" + code + "/matches"
     params = {"dateFrom": date_from, "dateTo": date_to}
     async with httpx.AsyncClient(timeout=20) as client:
@@ -879,11 +991,14 @@ async def fetch_competition_matches(code: str, date_from: str, date_to: str):
             if r.status_code != 200:
                 print("Erreur " + code + " : " + str(r.status_code))
                 return []
-            return r.json().get("matches", [])
+            matches = r.json().get("matches", [])
+            if matches:
+                cache_set(cache_key, matches, ttl_hours=6)
+            return matches
         except Exception as e:
             print("Exception " + code + " : " + str(e))
             return []
-        
+
 async def _fetch_zafronix_with_etag(url: str, headers: dict, params: dict, competition_name: str) -> list:
     """Fonction générique pour appeler Zafronix avec gestion du cache ETag."""
     if not ZAFRONIX_API_KEY:
@@ -3168,6 +3283,37 @@ async def fix_league_names():
         return {"status": "success", "message": f"{total_updated} matchs mis à jour avec les bons noms de ligues."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+@app.get("/admin/cache-status")
+def cache_status():
+    conn = db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT cache_key, cached_at, expires_at,
+               LENGTH(data) as size_bytes,
+               (expires_at > NOW()) as valid
+        FROM api_cache
+        ORDER BY cached_at DESC
+    """)
+    rows = c.fetchall()
+    c.close()
+    conn.close()
+    return {"count": len(rows), "entries": [dict(r) for r in rows]}
+
+
+@app.post("/admin/clear-cache")
+def clear_cache(prefix: str = ""):
+    conn = db()
+    c = conn.cursor()
+    if prefix:
+        c.execute("DELETE FROM api_cache WHERE cache_key LIKE %s", (prefix + "%",))
+    else:
+        c.execute("DELETE FROM api_cache")
+    deleted = c.rowcount
+    conn.commit()
+    c.close()
+    conn.close()
+    return {"status": "success", "deleted": deleted, "prefix": prefix or "(all)"}
 
 @app.get("/debug/fc-leagues")
 async def debug_fc_leagues():
