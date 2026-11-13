@@ -2771,7 +2771,7 @@ def get_leagues():
     return [r["league"] for r in rows]
     
 @app.get("/tickets/{day}")
-def get_tickets(day: str):
+async def get_tickets(day: str):
     try:
      # Récupérer les cotes bookmaker du jour
         await fetch_and_store_odds(day)
