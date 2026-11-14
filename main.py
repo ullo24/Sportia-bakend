@@ -2781,7 +2781,9 @@ async def get_tickets(day: str):
         # 👈 CORRECTION ICI : Utilisation du curseur
         c = conn.cursor()
         c.execute(
-            "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s ORDER BY kickoff ASC",
+            "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s "
+            "AND (is_fallback = 0 OR is_fallback IS NULL) "
+            "ORDER BY kickoff ASC",
             (day,),
         )
         rows = c.fetchall()
@@ -3045,7 +3047,9 @@ async def get_tickets_week():
     conn = db()
     c = conn.cursor()
     c.execute(
-        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) BETWEEN %s AND %s ORDER BY kickoff ASC",
+        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) BETWEEN %s AND %s "
+        "AND (is_fallback = 0 OR is_fallback IS NULL) "
+        "ORDER BY kickoff ASC",
         (today.isoformat(), week_later),
     )
     rows = c.fetchall()
@@ -3196,7 +3200,9 @@ async def get_tickets_week_value():
     conn = db()
     c = conn.cursor()
     c.execute(
-        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) BETWEEN %s AND %s ORDER BY kickoff ASC",
+        "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) BETWEEN %s AND %s "
+        "AND (is_fallback = 0 OR is_fallback IS NULL) "
+        "ORDER BY kickoff ASC",
         (today.isoformat(), week_later),
     )
     rows = c.fetchall()
