@@ -3946,6 +3946,43 @@ async def admin_fetch_odds(day: str = None):
 def repredict_status():
     return _REPREDICT_STATUS
 
+@app.post("/admin/flag-scheduled-fallbacks")
+async def flag_scheduled_fallbacks(background_tasks: BackgroundTasks):
+    background_tasks.add_task(run_flag_scheduled_fallbacks)
+    return {"status": "started", "message": "Marquage des fallbacks SCHEDULED en cours"}
+
+
+async def run_flag_scheduled_fallbacks():
+    conn = db(); c = conn.cursor()
+    c.execute(
+        "SELECT id, league, home, away, kickoff FROM matches "
+        "WHERE status IN ('SCHEDULED', 'TIMED')"
+    )
+    rows = c.fetchall()
+    c.close(); conn.close()
+
+    print(f"=== Marquage fallbacks de {len(rows)} matchs SCHEDULED ===")
+    updated = 0
+    for r in rows:
+        try:
+            hs = compute_stats_from_history(r["home"], before_date=r["kickoff"])
+            as_ = compute_stats_from_history(r["away"], before_date=r["kickoff"])
+            is_fb = 1 if (
+                not hs or not as_
+                or hs["matches_played"] < 3
+                or as_["matches_played"] < 3
+            ) else 0
+
+            conn = db(); c = conn.cursor()
+            c.execute("UPDATE matches SET is_fallback = %s WHERE id = %s",
+                      (is_fb, r["id"]))
+            conn.commit(); c.close(); conn.close()
+            updated += 1
+        except Exception as e:
+            print(f"Erreur {r.get('id')}: {e}")
+
+    print(f"=== {updated} matchs SCHEDULED marqués ===")
+
 
 async def run_repredict_history(limit: int = 0):
     global _REPREDICT_STATUS
