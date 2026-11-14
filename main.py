@@ -2284,41 +2284,34 @@ def _build_value_safe_ticket(all_picks, min_value=1.03, min_n=2, max_n=4, max_co
 
 def _summarize_ticket(picks):
     if not picks:
-        return {"total_cote": 1.0, "total_cote_bookmaker": 1.0,
-                "count": 0, "joint_prob": 0.0, "joint_prob_pct": 0.0,
-                "avg_value": 0.0, "picks": []}
-
-    total_cote = 1.0
-    total_bk = 1.0
+        return {
+            "total_cote": 1.0,
+            "count": 0,
+            "joint_prob": 0.0,
+            "joint_prob_pct": 0.0,
+            "fallback_count": 0,
+            "has_fallback": False,
+            "picks": [],
+        }
+    
+    total_cote = _calc_total_cote(picks)
+    
     joint = 1.0
-    total_value = 0.0
-    has_odds = 0
-
     for p in picks:
-        total_cote *= p["cote"]
         joint *= p["proba"]
-        if p.get("cote_bookmaker"):
-            total_bk *= p["cote_bookmaker"]
-            total_value += p.get("value", 1.0)
-            has_odds += 1
-        else:
-            total_bk *= p["cote"]  # fallback
-
-    avg_value = (total_value / has_odds) if has_odds else 0.0
-
+    
+    fallback_count = sum(1 for p in picks if p.get("is_fallback", 0) == 1)
+    
     return {
-        "total_cote": round(total_cote, 2),
-        "total_cote_bookmaker": round(total_bk, 2),
+        "total_cote": total_cote,
         "count": len(picks),
         "joint_prob": round(joint, 6),
         "joint_prob_pct": round(joint * 100, 2),
-        "avg_value": round(avg_value, 3),
-        "has_real_odds": has_odds == len(picks),
-        "fallback_count": fallback_count,        # 👈 AJOUTE
-        "has_fallback": fallback_count > 0,      # 👈 AJOUTE
+        "fallback_count": fallback_count,
+        "has_fallback": fallback_count > 0,
         "picks": picks,
     }
-
+    
 def _calc_risky_pick(m):
     hw = m.get("home_win") or 0
     d = m.get("draw") or 0
