@@ -3971,7 +3971,8 @@ async def run_repredict_history(limit: int = 0):
         q += f" LIMIT {int(limit)}"
     c.execute(q)
     rows = c.fetchall()
-    c.close(); conn.close()
+    c.close()
+    conn.close()
 
     _REPREDICT_STATUS["total"] = len(rows)
     print(f"=== Re-prédiction as-of de {len(rows)} matchs ===")
@@ -3981,8 +3982,7 @@ async def run_repredict_history(limit: int = 0):
             league_name = r["league"] or ""
             code = LEAGUE_NAME_TO_CODE.get(league_name, "")
             before_date = r["kickoff"]
-            
-            
+
             hx, ax = calc_expected_goals_v2e(code, r["home"], r["away"], before_date=before_date)
             base = LEAGUE_AVG_GOALS.get(code, 2.7)
             fallback_h = round((base / 2.0) * _SQRT_HA, 2)
@@ -3993,7 +3993,8 @@ async def run_repredict_history(limit: int = 0):
                 pred["home_win"], pred["draw"], pred["away_win"]
             )
 
-                        conn = db(); c = conn.cursor()
+            conn = db()
+            c = conn.cursor()
             c.execute("""
                 UPDATE matches SET
                     home_win=%s, draw=%s, away_win=%s,
@@ -4009,7 +4010,7 @@ async def run_repredict_history(limit: int = 0):
                     first_half_over_15=%s, exact_scores=%s,
                     home_scores=%s, away_scores=%s,
                     home_xg=%s, away_xg=%s, total_xg=%s, confidence=%s, is_fallback=%s,
-                    updated_at = NOW()
+                    updated_at = NOW()::text
                 WHERE id=%s
             """, (
                 pred["home_win"], pred["draw"], pred["away_win"],
@@ -4028,15 +4029,28 @@ async def run_repredict_history(limit: int = 0):
                 r["id"],
             ))
             rows_updated = c.rowcount
-            conn.commit(); c.close(); conn.close()
+            conn.commit()
+            c.close()
+            conn.close()
 
             if rows_updated > 0:
                 _REPREDICT_STATUS["done"] += 1
             else:
                 _REPREDICT_STATUS["errors"] += 1
                 if _REPREDICT_STATUS["errors"] <= 10:
-                    print(f"⚠️ UPDATE 0 ligne pour id={r['id']} ({r['home']} vs {r['away']})")  
-                    
+                    print(f"UPDATE 0 ligne pour id={r['id']} ({r['home']} vs {r['away']})")
+
+            if (idx + 1) % 500 == 0:
+                print(f"  {idx + 1}/{len(rows)} matchs traités...")
+        except Exception as e:
+            _REPREDICT_STATUS["errors"] += 1
+            if _REPREDICT_STATUS["errors"] <= 10:
+                print(f"Erreur match {r.get('id')}: {e}")
+
+    _REPREDICT_STATUS["running"] = False
+    _REPREDICT_STATUS["finished_at"] = datetime.now().isoformat()
+    print(f"=== Re-prédiction terminée : {_REPREDICT_STATUS['done']} OK, {_REPREDICT_STATUS['errors']} erreurs ===")
+    
 @app.get("/debug/fc-leagues")
 async def debug_fc_leagues():
     headers = {"Authorization": f"Bearer {FC_API_KEY}"}
