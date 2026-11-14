@@ -3977,10 +3977,14 @@ async def run_repredict_history(limit: int = 0):
             code = LEAGUE_NAME_TO_CODE.get(league_name, "")
             before_date = r["kickoff"]
 
+            hs = compute_stats_from_history(r["home"], before_date=before_date)
+            as_ = compute_stats_from_history(r["away"], before_date=before_date)
+            is_fallback = 1 if (
+                not hs or not as_
+                or hs["matches_played"] < 3
+                or as_["matches_played"] < 3
+            ) else 0
             hx, ax = calc_expected_goals_v2e(code, r["home"], r["away"], before_date=before_date)
-            base = LEAGUE_AVG_GOALS.get(code, 2.7)
-            fallback_h = round((base / 2.0) * _SQRT_HA, 2)
-            is_fallback = 1 if hx == fallback_h else 0
             pred = predict_all_markets(hx, ax)
             ext = predict_extended_markets(
                 hx, ax,
