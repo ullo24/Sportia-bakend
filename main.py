@@ -2805,9 +2805,8 @@ async def get_tickets(day: str):
 
         if not all_picks:
             return {"error": "Aucun pick disponible", "date": day}
-                    # Séparation fallback / non-fallback
-            picks_no_fb = [p for p in all_picks if p.get("is_fallback", 0) == 0]
-            picks_fb = [p for p in all_picks if p.get("is_fallback", 0) == 1]
+        picks_no_fb = [p for p in all_picks if p.get("is_fallback", 0) == 0]
+        picks_fb = [p for p in all_picks if p.get("is_fallback", 0) == 1]
 
                 # 👈 Petite fonction utilitaire pour identifier la CL
         def is_cl(p):
