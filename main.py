@@ -1882,6 +1882,7 @@ def _all_picks_for_match(m):
             "proba": round(prob, 4), "cote": round(cote, 2),
             "group": _MARKET_GROUP.get(label, "other"),
             "confidence": m.get("confidence") or 0.5,
+            "is_fallback": m.get("is_fallback", 0),
         })
     return picks
 
@@ -2313,6 +2314,8 @@ def _summarize_ticket(picks):
         "joint_prob_pct": round(joint * 100, 2),
         "avg_value": round(avg_value, 3),
         "has_real_odds": has_odds == len(picks),
+        "fallback_count": fallback_count,        # 👈 AJOUTE
+        "has_fallback": fallback_count > 0,      # 👈 AJOUTE
         "picks": picks,
     }
 
@@ -2782,7 +2785,6 @@ async def get_tickets(day: str):
         c = conn.cursor()
         c.execute(
             "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s "
-            "AND (is_fallback = 0 OR is_fallback IS NULL) "
             "ORDER BY kickoff ASC",
             (day,),
         )
@@ -2803,16 +2805,20 @@ async def get_tickets(day: str):
 
         if not all_picks:
             return {"error": "Aucun pick disponible", "date": day}
+                    # Séparation fallback / non-fallback
+            picks_no_fb = [p for p in all_picks if p.get("is_fallback", 0) == 0]
+            picks_fb = [p for p in all_picks if p.get("is_fallback", 0) == 1]
 
                 # 👈 Petite fonction utilitaire pour identifier la CL
         def is_cl(p):
             return p.get("league") == "Champions League"
 
-                # === SAFE === (fenêtre élargie : modèle calibré trop prudent)
-        safe = _build_safe_ticket(all_picks, min_cote=2.20, max_cote=3.20)
+                # === SAFE (uniquement non-fallback) ===
+        safe = _build_safe_ticket(picks_no_fb, min_cote=2.20, max_cote=3.20)
         safe_ids = {p["match_id"] for p in safe}
- # === MEDIUM SHORT ===
-        medium_short_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
+
+        # === MEDIUM SHORT (uniquement non-fallback) ===
+        medium_short_pool = [p for p in picks_no_fb if p["match_id"] not in safe_ids]
         medium_short = _build_ticket_optimized(
             medium_short_pool,
             target_cote=55.0,
@@ -2820,13 +2826,13 @@ async def get_tickets(day: str):
             min_proba=0.50,
             max_per_market=2,
             max_per_group=3,
-            max_per_league=4,       # 👈 diversité inter-ligues
+            max_per_league=4,
         )
         medium_short_ids = {p["match_id"] for p in medium_short}
 
-# === MEDIUM LONG ===
+        # === MEDIUM LONG (uniquement non-fallback) ===
         medium_long_pool = [
-            p for p in all_picks
+            p for p in picks_no_fb
             if p["match_id"] not in safe_ids
             and p["match_id"] not in medium_short_ids
         ]
@@ -2837,11 +2843,11 @@ async def get_tickets(day: str):
             min_proba=0.40,
             max_per_market=3,
             max_per_group=4,
-            max_per_league=5,       # 👈 diversité inter-ligues
+            max_per_league=5,
         )
         medium_long_ids = {p["match_id"] for p in medium_long}
 
-# === RISKY === (adaptatif si peu de matchs disponibles)
+        # === RISKY (TOUS les picks restants, fallback inclus) ===
         risky_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
@@ -2851,7 +2857,6 @@ async def get_tickets(day: str):
 
         risky_distinct = len(set(p["match_id"] for p in risky_pool))
         if risky_distinct >= 4:
-            # Ajuster min_n au nombre réel de matchs dispo (min 4, max 10)
             effective_min_n = min(10, risky_distinct)
             risky = _build_ticket_optimized(
                 risky_pool,
@@ -2862,8 +2867,7 @@ async def get_tickets(day: str):
                 max_per_group=6,
             )
         else:
-            risky = []
-            
+            risky = []            
         match_map = {dict(r)["id"]: dict(r) for r in rows}
 
         def enrich(picks):
