@@ -2806,11 +2806,8 @@ async def get_tickets(day: str):
         def is_cl(p):
             return p.get("league") == "Champions League"
 
-                # === SAFE === (value bets réels)
-        safe = _build_value_safe_ticket(all_picks, min_value=1.03, min_n=2, max_n=4)
-        if not safe:
-            # Fallback : safe sans value mais avec cotes bookmaker affichées
-            safe = _build_safe_ticket(all_picks, min_cote=1.80, max_cote=3.50)
+                # === SAFE === (fenêtre élargie : modèle calibré trop prudent)
+        safe = _build_safe_ticket(all_picks, min_cote=2.20, max_cote=3.20)
         safe_ids = {p["match_id"] for p in safe}
  # === MEDIUM SHORT ===
         medium_short_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
