@@ -3766,6 +3766,7 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
     """
     Backteste le ticket safe sur les N derniers jours.
     Ignore les jours avec matchs sans score ou safes hors bornes.
+    Exclut les fallbacks (is_fallback = 0).
     """
     today = date.today()
     total_days = 0
@@ -3786,8 +3787,8 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
             "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s "
             "AND status = 'FINISHED' "
             "AND home_goals IS NOT NULL "
-            "AND away_goals IS NOT NULL",
-            "AND is_fallback = 0 ",
+            "AND away_goals IS NOT NULL "
+            "AND (is_fallback = 0 OR is_fallback IS NULL)",
             (day_str,),
         )
         rows = c.fetchall()
@@ -3864,7 +3865,6 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
                 "score": ev["current_score"],
             })
 
-        # Jour non évaluable (un pick pending) → exclu du calcul
         if has_unknown:
             details.append({
                 "date": day_str,
@@ -3875,7 +3875,6 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
             })
             continue
 
-        # Safe hors bornes (fallback appliqué) → exclu du calcul
         if not (min_cote <= safe_cote <= max_cote):
             details.append({
                 "date": day_str,
@@ -3887,7 +3886,6 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
             })
             continue
 
-        # Jour pleinement évaluable
         days_with_safe += 1
         if all_won:
             safes_won += 1
@@ -3929,7 +3927,6 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
         "max_cote": max_cote,
         "details": details,
     }
-
 # ===== RE-PRÉDICTION HISTORIQUE (AS-OF) =====
 _REPREDICT_STATUS = {"running": False, "done": 0, "total": 0, "errors": 0, "started_at": None}
 
