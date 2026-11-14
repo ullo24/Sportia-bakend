@@ -1908,6 +1908,7 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
         candidates = sorted(
             filtered,
             key=lambda p: (
+                p.get("is_fallback", 0),
                 p.get("league") != "Champions League",
                 abs(p["cote"] - ideal_per_pick),
                 -p["proba"],
@@ -2116,6 +2117,14 @@ def _store_odds_for_sport(events: list, internal_matches: list, sport_key: str) 
         conn.commit(); c.close(); conn.close()
 
     return stored
+
+
+def _effective_proba(p):
+    """Proba effective pour le tri. Pénalise les fallbacks de 20%."""
+    proba = p.get("proba", 0)
+    if p.get("is_fallback", 0) == 1:
+        proba *= 0.80
+    return proba
     
 def _build_safe_ticket(all_picks, min_cote=2.0, max_cote=2.50):
     """
@@ -2128,16 +2137,17 @@ def _build_safe_ticket(all_picks, min_cote=2.0, max_cote=2.50):
     from itertools import combinations
 
     candidates = []
+        candidates = []
     for min_proba_safe in [0.72, 0.68, 0.65, 0.62]:
         temp = [
             p for p in all_picks
             if p["market"] in _SAFE_MARKETS
-            and p["proba"] >= min_proba_safe
-            and 1.30 <= p["cote"] <= 2.10      # 👈 1.10 → 1.30
+            and _effective_proba(p) >= min_proba_safe
+            and 1.30 <= p["cote"] <= 2.10
         ]
         for p in all_picks:
             if (p["market"] in ("1", "2")
-                and p["proba"] >= min_proba_safe + 0.06
+                and _effective_proba(p) >= min_proba_safe + 0.06
                 and 1.30 <= p["cote"] <= 2.10):
                 temp.append(p)
         if len(temp) >= 4:
@@ -2145,7 +2155,6 @@ def _build_safe_ticket(all_picks, min_cote=2.0, max_cote=2.50):
             break
         if len(temp) > len(candidates):
             candidates = temp
-
     if len(candidates) < 2:
         return []
 
@@ -2160,7 +2169,7 @@ def _build_safe_ticket(all_picks, min_cote=2.0, max_cote=2.50):
     if len(candidates) < 2:
         return []
 
-    candidates.sort(key=lambda p: -p["proba"])
+    candidates.sort(key=lambda p: -_effective_proba(p))
     candidates = candidates[:25]
 
     best_combo = None
@@ -2427,7 +2436,7 @@ def _build_weekly_ticket(all_picks):
             
             # Plus un marché est utilisé, plus son score baisse.
             # Cela force l'algorithme à choisir un autre marché (ex: BTTS au lieu de -4.5)
-            score = p.get("proba", 0) - (count * 0.05)
+            score = _effective_proba(p) - (count * 0.05) 
             
             if score > best_score:
                 best_score = score
@@ -2798,19 +2807,17 @@ async def get_tickets(day: str):
 
         if not all_picks:
             return {"error": "Aucun pick disponible", "date": day}
-        picks_no_fb = [p for p in all_picks if p.get("is_fallback", 0) == 0]
-        picks_fb = [p for p in all_picks if p.get("is_fallback", 0) == 1]
-
+        
                 # 👈 Petite fonction utilitaire pour identifier la CL
         def is_cl(p):
             return p.get("league") == "Champions League"
 
                 # === SAFE (uniquement non-fallback) ===
-        safe = _build_safe_ticket(picks_no_fb, min_cote=2.20, max_cote=3.20)
+        safe = _build_safe_ticket(all_picks, min_cote=2.20, max_cote=3.20)
         safe_ids = {p["match_id"] for p in safe}
 
         # === MEDIUM SHORT (uniquement non-fallback) ===
-        medium_short_pool = [p for p in picks_no_fb if p["match_id"] not in safe_ids]
+        medium_short_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
         medium_short = _build_ticket_optimized(
             medium_short_pool,
             target_cote=55.0,
@@ -2824,7 +2831,7 @@ async def get_tickets(day: str):
 
         # === MEDIUM LONG (uniquement non-fallback) ===
         medium_long_pool = [
-            p for p in picks_no_fb
+            p for p in all_picks
             if p["match_id"] not in safe_ids
             and p["match_id"] not in medium_short_ids
         ]
@@ -3044,7 +3051,6 @@ async def get_tickets_week():
     c = conn.cursor()
     c.execute(
         "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) BETWEEN %s AND %s "
-        "AND (is_fallback = 0 OR is_fallback IS NULL) "
         "ORDER BY kickoff ASC",
         (today.isoformat(), week_later),
     )
