@@ -2857,7 +2857,8 @@ async def get_tickets(day: str):
                 max_cote=150.0,
             )
         else:
-            risky = []        match_map = {dict(r)["id"]: dict(r) for r in rows}
+            risky = []        
+        match_map = {dict(r)["id"]: dict(r) for r in rows}
 
         def enrich(picks):
             for p in picks:
