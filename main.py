@@ -1889,6 +1889,8 @@ def _all_picks_for_match(m):
 def _build_ticket_optimized(pool, target_cote, min_n, max_n,
                              min_proba=0.50, max_per_market=2,
                              max_per_group=3, max_per_league=None):
+                             max_cote=None):
+
     if not pool:
         return []
 
@@ -1946,9 +1948,10 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
             
         if len(combo) < min_n:
             continue
-            
         cote = _calc_total_cote(combo)
-        diff = abs(cote - target_cote)
+        if max_cote is not None and cote > max_cote:
+            continue
+        diff = abs(cote - target_cote)    
         joint = 1.0
         for p in combo:
             joint *= p["proba"]
@@ -2818,15 +2821,15 @@ async def get_tickets(day: str):
         medium_short_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
         medium_short = _build_ticket_optimized(
             medium_short_pool,
-            target_cote=55.0,
-            min_n=5, max_n=8,
-            min_proba=0.50,
-            max_per_market=2,
-            max_per_group=3,
-            max_per_league=4,
+            target_cote=10.0,
+            min_n=3, max_n=5,
+            min_proba=0.58,
+            max_per_market=1,
+            max_per_group=2,
+            max_per_league=2,
+            max_cote=12.0,
         )
         medium_short_ids = {p["match_id"] for p in medium_short}
-
         # === MEDIUM LONG (uniquement non-fallback) ===
         medium_long_pool = [
             p for p in all_picks
@@ -2835,15 +2838,15 @@ async def get_tickets(day: str):
         ]
         medium_long = _build_ticket_optimized(
             medium_long_pool,
-            target_cote=125.0,
-            min_n=7, max_n=10,
-            min_proba=0.40,
-            max_per_market=3,
-            max_per_group=4,
-            max_per_league=5,
+            target_cote=20.0,
+            min_n=4, max_n=7,
+            min_proba=0.52,
+            max_per_market=2,
+            max_per_group=3,
+            max_per_league=3,
+            max_cote=30.0,
         )
         medium_long_ids = {p["match_id"] for p in medium_long}
-
         # === RISKY (TOUS les picks restants, fallback inclus) ===
         risky_pool = [
             p for p in all_picks
@@ -2853,18 +2856,21 @@ async def get_tickets(day: str):
         ]
 
         risky_distinct = len(set(p["match_id"] for p in risky_pool))
-        if risky_distinct >= 4:
-            effective_min_n = min(10, risky_distinct)
+        if risky_distinct >= 5:
+            effective_min_n = min(7, risky_distinct)
             risky = _build_ticket_optimized(
                 risky_pool,
-                target_cote=1000.0,
-                min_n=effective_min_n, max_n=15,
-                min_proba=0.28,
-                max_per_market=4,
-                max_per_group=6,
+                target_cote=100.0,
+                min_n=effective_min_n, max_n=9,
+                min_proba=0.45,
+                max_per_market=2,
+                max_per_group=3,
+                max_per_league=3,
+                max_cote=150.0,
             )
         else:
             risky = []            
+            
         match_map = {dict(r)["id"]: dict(r) for r in rows}
 
         def enrich(picks):
@@ -3265,11 +3271,13 @@ async def get_tickets_week_value():
     # On cherche une cote de 300 avec max 15 picks, en privilégiant les probas > 50%
     value_selected = _build_ticket_optimized(
         all_picks,
-        target_cote=300.0,
-        min_n=10, max_n=15,
-        min_proba=0.50,
-        max_per_market=3,
-        max_per_group=5
+        target_cote=150.0,
+        min_n=6, max_n=10,
+        min_proba=0.52,
+        max_per_market=2,
+        max_per_group=3,
+        max_per_league=3,
+        max_cote=300.0,
     )
 
     # Sécurité : si l'algo n'a pas trouvé assez de picks, on prend les meilleurs dispos
