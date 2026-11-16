@@ -2834,6 +2834,14 @@ async def get_tickets(day: str):
         )
         medium_long_ids = {p["match_id"] for p in medium_long}
         # === RISKY (TOUS les picks restants, fallback inclus) ===
+                # === RISKY ===
+        risky_pool = [
+            p for p in all_picks
+            if p["match_id"] not in safe_ids
+            and p["match_id"] not in medium_short_ids
+            and p["match_id"] not in medium_long_ids
+        ]
+
         risky_distinct = len(set(p["match_id"] for p in risky_pool))
         if risky_distinct >= 5:
             effective_min_n = min(7, risky_distinct)
@@ -2849,8 +2857,7 @@ async def get_tickets(day: str):
                 max_cote=150.0,
             )
         else:
-            risky = []
-        match_map = {dict(r)["id"]: dict(r) for r in rows}
+            risky = []        match_map = {dict(r)["id"]: dict(r) for r in rows}
 
         def enrich(picks):
             for p in picks:
