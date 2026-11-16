@@ -1889,7 +1889,7 @@ def _all_picks_for_match(m):
 def _build_ticket_optimized(pool, target_cote, min_n, max_n,
                              min_proba=0.50, max_per_market=2,
                              max_per_group=3, max_per_league=None,
-                             max_cote=None):
+                             min_cote=None, max_cote=None):
     if not pool:
         return []
 
@@ -1950,6 +1950,8 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
         cote = _calc_total_cote(combo)
         if max_cote is not None and cote > max_cote:
             continue
+        if min_cote is not None and cote < min_cote:
+            continue
         diff = abs(cote - target_cote)    
         joint = 1.0
         for p in combo:
@@ -1960,22 +1962,7 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
         if score < best_diff:
             best_diff = score
             best_combo = combo
-        # 👇 Fallback : si aucun combo ne respecte les contraintes, prendre min_n picks
-    if not best_combo and filtered:
-        sorted_pool = sorted(filtered, key=lambda p: -p["proba"])
-        fallback = []
-        used_m = set()
-        for p in sorted_pool:
-            if p["match_id"] in used_m:
-                continue
-            fallback.append(p)
-            used_m.add(p["match_id"])
-            if len(fallback) >= min_n:
-                break
-        if fallback:
-            return fallback
-        
-    return best_combo or []
+        return best_combo or []
 # ===== TICKET SAFE OPTIMISÉ (max joint prob) =====
 
 _SAFE_MARKETS = {
@@ -2847,13 +2834,6 @@ async def get_tickets(day: str):
         )
         medium_long_ids = {p["match_id"] for p in medium_long}
         # === RISKY (TOUS les picks restants, fallback inclus) ===
-        risky_pool = [
-            p for p in all_picks
-            if p["match_id"] not in safe_ids
-            and p["match_id"] not in medium_short_ids
-            and p["match_id"] not in medium_long_ids
-        ]
-
         risky_distinct = len(set(p["match_id"] for p in risky_pool))
         if risky_distinct >= 5:
             effective_min_n = min(7, risky_distinct)
@@ -2862,14 +2842,14 @@ async def get_tickets(day: str):
                 target_cote=100.0,
                 min_n=effective_min_n, max_n=9,
                 min_proba=0.45,
-                max_per_market=2,
-                max_per_group=3,
-                max_per_league=3,
+                max_per_market=3,
+                max_per_group=4,
+                max_per_league=4,
+                min_cote=50.0,
                 max_cote=150.0,
             )
         else:
-            risky = []            
-            
+            risky = []
         match_map = {dict(r)["id"]: dict(r) for r in rows}
 
         def enrich(picks):
