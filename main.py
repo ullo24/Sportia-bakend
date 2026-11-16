@@ -3925,6 +3925,172 @@ def safe_backtest(days: int = 14, min_cote: float = 2.00, max_cote: float = 2.50
         "max_cote": max_cote,
         "details": details,
     }
+
+@app.get("/admin/tickets-backtest")
+def tickets_backtest(days: int = 30):
+    """
+    Backteste les 4 tickets (safe, medium_short, medium_long, risky)
+    sur les N derniers jours. Compare taux réel vs joint_prob annoncée.
+    """
+    from itertools import combinations
+
+    today = date.today()
+    results = {
+        "safe":         {"wins": 0, "losses": 0, "unknown": 0, "joints": []},
+        "medium_short": {"wins": 0, "losses": 0, "unknown": 0, "joints": []},
+        "medium_long":  {"wins": 0, "losses": 0, "unknown": 0, "joints": []},
+        "risky":        {"wins": 0, "losses": 0, "unknown": 0, "joints": []},
+    }
+    days_with_data = 0
+    day_details = []
+
+    for i in range(1, days + 1):
+        day_str = (today - timedelta(days=i)).isoformat()
+
+        conn = db()
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM matches WHERE SUBSTRING(kickoff, 1, 10) = %s "
+            "AND status = 'FINISHED' "
+            "AND home_goals IS NOT NULL "
+            "AND away_goals IS NOT NULL",
+            (day_str,),
+        )
+        rows = c.fetchall()
+        c.close()
+        conn.close()
+
+        if not rows:
+            continue
+        days_with_data += 1
+
+        all_picks = []
+        for r in rows:
+            m = dict(r)
+            try:
+                all_picks.extend(_all_picks_for_match(m))
+            except Exception:
+                continue
+
+        if len(all_picks) < 2:
+            continue
+
+        # Construire les 4 tickets du jour
+        safe = _build_safe_ticket(all_picks, min_cote=2.00, max_cote=2.50)
+        safe_ids = {p["match_id"] for p in safe}
+
+        ms_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
+        medium_short = _build_ticket_optimized(
+            ms_pool, target_cote=10.0, min_n=3, max_n=5,
+            min_proba=0.58, max_per_market=1, max_per_group=2,
+            max_per_league=2, min_cote=7.0, max_cote=12.0,
+        )
+        ms_ids = {p["match_id"] for p in medium_short}
+
+        ml_pool = [
+            p for p in all_picks
+            if p["match_id"] not in safe_ids and p["match_id"] not in ms_ids
+        ]
+        medium_long = _build_ticket_optimized(
+            ml_pool, target_cote=20.0, min_n=4, max_n=7,
+            min_proba=0.52, max_per_market=2, max_per_group=3,
+            max_per_league=3, min_cote=15.0, max_cote=30.0,
+        )
+        ml_ids = {p["match_id"] for p in medium_long}
+
+        rk_pool = [
+            p for p in all_picks
+            if p["match_id"] not in safe_ids
+            and p["match_id"] not in ms_ids
+            and p["match_id"] not in ml_ids
+        ]
+        rk_distinct = len(set(p["match_id"] for p in rk_pool))
+        if rk_distinct >= 5:
+            risky = _build_ticket_optimized(
+                rk_pool, target_cote=100.0,
+                min_n=min(7, rk_distinct), max_n=9,
+                min_proba=0.45, max_per_market=3, max_per_group=4,
+                max_per_league=4, min_cote=50.0, max_cote=150.0,
+            )
+        else:
+            risky = []
+
+        match_map = {dict(r)["id"]: dict(r) for r in rows}
+
+        def evaluate_ticket(picks, ticket_name):
+            if not picks:
+                return
+            joint = 1.0
+            for p in picks:
+                joint *= p["proba"]
+            results[ticket_name]["joints"].append(joint)
+
+            all_won = True
+            has_unknown = False
+            for p in picks:
+                match = match_map.get(p["match_id"])
+                if not match:
+                    has_unknown = True
+                    continue
+                ev = _evaluate_pick(p, match)
+                if ev["result"] == "pending":
+                    has_unknown = True
+                    continue
+                if ev["result"] != "won":
+                    all_won = False
+
+            if has_unknown:
+                results[ticket_name]["unknown"] += 1
+            elif all_won:
+                results[ticket_name]["wins"] += 1
+            else:
+                results[ticket_name]["losses"] += 1
+
+        evaluate_ticket(safe, "safe")
+        evaluate_ticket(medium_short, "medium_short")
+        evaluate_ticket(medium_long, "medium_long")
+        evaluate_ticket(risky, "risky")
+
+        day_details.append({
+            "date": day_str,
+            "safe_count": len(safe),
+            "ms_count": len(medium_short),
+            "ml_count": len(medium_long),
+            "risky_count": len(risky),
+        })
+
+    # Calculer les stats par ticket
+    output = {}
+    for name, r in results.items():
+        total = r["wins"] + r["losses"]
+        taux_reel = (r["wins"] / total) if total > 0 else 0
+        joint_moy = (sum(r["joints"]) / len(r["joints"])) if r["joints"] else 0
+        ecart = (taux_reel - joint_moy) * 100
+
+        if abs(ecart) < 10:
+            cal = "OK"
+        elif ecart < 0:
+            cal = "SURESTIME"
+        else:
+            cal = "SOUSESTIME"
+
+        output[name] = {
+            "wins": r["wins"],
+            "losses": r["losses"],
+            "unknown": r["unknown"],
+            "total_evaluable": total,
+            "taux_reel_pct": round(taux_reel * 100, 2),
+            "joint_prob_moy_pct": round(joint_moy * 100, 2),
+            "ecart_pct": round(ecart, 2),
+            "calibration": cal,
+        }
+
+    return {
+        "period_days": days,
+        "days_with_data": days_with_data,
+        "tickets": output,
+        "daily_breakdown": day_details,
+    }
 # ===== RE-PRÉDICTION HISTORIQUE (AS-OF) =====
 _REPREDICT_STATUS = {"running": False, "done": 0, "total": 0, "errors": 0, "started_at": None}
 
