@@ -1888,9 +1888,8 @@ def _all_picks_for_match(m):
 
 def _build_ticket_optimized(pool, target_cote, min_n, max_n,
                              min_proba=0.50, max_per_market=2,
-                             max_per_group=3, max_per_league=None):
+                             max_per_group=3, max_per_league=None,
                              max_cote=None):
-
     if not pool:
         return []
 
