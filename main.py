@@ -2773,13 +2773,13 @@ async def get_tickets(day: str):
             max_cote=12.0,
         ) or []
         medium_short_ids = {p["match_id"] for p in medium_short}
-# === MEDIUM LONG (uniquement non-fallback) ===
+# === MEDIUM LONG ===
         medium_long_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
             and p["match_id"] not in medium_short_ids
         ]
-                medium_long = _build_ticket_optimized(
+        medium_long = _build_ticket_optimized(
             medium_long_pool,
             target_cote=20.0,
             min_n=4, max_n=7,
@@ -2790,7 +2790,8 @@ async def get_tickets(day: str):
             max_cote=30.0,
         ) or []
         medium_long_ids = {p["match_id"] for p in medium_long}
-# === RISKY (TOUS les picks restants, fallback inclus) ===
+
+        # === RISKY ===
         risky_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
