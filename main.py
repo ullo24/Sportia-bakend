@@ -2754,13 +2754,10 @@ async def get_tickets(day: str):
                 # 👈 Petite fonction utilitaire pour identifier la CL
         def is_cl(p):
             return p.get("league") == "Champions League"
-
-                # === SAFE (uniquement non-fallback) ===
+    # === SAFE (uniquement non-fallback) ===
         safe = _build_safe_ticket(all_picks, min_cote=2.00, max_cote=2.50) or []
-        if not safe:
-            safe = _build_improvised_safe(all_picks) or []
-        safe_ids = {p["match_id"] for p in safe}
-# === MEDIUM SHORT (uniquement non-fallback) ===
+        safe_ids = {p["match_id"] for p in safe} 
+    # === MEDIUM SHORT (uniquement non-fallback) ===
         medium_short_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
         medium_short = _build_ticket_optimized(
             medium_short_pool,
