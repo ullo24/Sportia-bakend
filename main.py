@@ -1091,52 +1091,6 @@ async def _fetch_zafronix_with_etag(url: str, headers: dict, params: dict, compe
         print(f"Exception Zafronix {competition_name} : {e}")
         return []
 
-async def fetch_zafronix_international(base_url: str, season: int, date_from: str, date_to: str, competition_name: str):
-    """Fonction générique pour récupérer les matchs Zafronix avec gestion des ETags."""
-    if not ZAFRONIX_API_KEY:
-        print(f"ZAFRONIX_API_KEY non definie pour {competition_name}")
-        return []
-
-    url = f"{base_url}/matches"
-    params = {"season": season} # ou "year" selon l'API
-    headers = {"X-API-Key": ZAFRONIX_API_KEY}
-
-    # 👈 On regarde si on a déjà un ETag pour cette URL
-    cached_etag = _ZAFRONIX_ETAG_CACHE.get(url)
-    if cached_etag:
-        headers["If-None-Match"] = cached_etag
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url, headers=headers, params=params)
-
-            # 👈 Si la réponse est 304, les données n'ont pas changé
-            if r.status_code == 304:
-                print(f"Zafronix {competition_name} : 304 Not Modified (quota économisé)")
-                return [] # On retourne une liste vide, le pipeline continuera avec les autres sources
-
-            if r.status_code != 200:
-                print(f"Erreur Zafronix {competition_name} : {r.status_code}")
-                return []
-
-            # 👈 On stocke le nouvel ETag pour la prochaine fois
-            new_etag = r.headers.get("ETag")
-            if new_etag:
-                _ZAFRONIX_ETAG_CACHE[url] = new_etag
-
-            data = r.json()
-            events = data.get("matches") or data.get("data") or data
-            filtered = []
-            for ev in events:
-                ev_date = ev.get("date") or ev.get("utcDate") or ""
-                if ev_date and date_from <= ev_date[:10] <= date_to:
-                    filtered.append(ev)
-            print(f"Zafronix {competition_name} : {len(events)} matchs recus, {len(filtered)} dans la fenetre")
-            return filtered
-    except Exception as e:
-        print(f"Exception Zafronix {competition_name} : {e}")
-        return []
-
 async def fetch_zafronix_europa_league(season: int, date_from: str, date_to: str):
     url = f"{ZAFRONIX_BASE_URL}/matches"
     params = {"season": season}
@@ -1964,7 +1918,7 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
         if score < best_diff:
             best_diff = score
             best_combo = combo
-        return best_combo or []
+    return best_combo or []
 # ===== TICKET SAFE OPTIMISÉ (max joint prob) =====
 
 _SAFE_MARKETS = {
@@ -2802,10 +2756,11 @@ async def get_tickets(day: str):
             return p.get("league") == "Champions League"
 
                 # === SAFE (uniquement non-fallback) ===
-        safe = _build_safe_ticket(all_picks, min_cote=2.20, max_cote=3.20)
+        safe = _build_safe_ticket(all_picks, min_cote=2.00, max_cote=2.50) or []
+        if not safe:
+            safe = _build_improvised_safe(all_picks) or []
         safe_ids = {p["match_id"] for p in safe}
-
-        # === MEDIUM SHORT (uniquement non-fallback) ===
+# === MEDIUM SHORT (uniquement non-fallback) ===
         medium_short_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
         medium_short = _build_ticket_optimized(
             medium_short_pool,
@@ -2816,15 +2771,15 @@ async def get_tickets(day: str):
             max_per_group=2,
             max_per_league=2,
             max_cote=12.0,
-        )
+        ) or []
         medium_short_ids = {p["match_id"] for p in medium_short}
-        # === MEDIUM LONG (uniquement non-fallback) ===
+# === MEDIUM LONG (uniquement non-fallback) ===
         medium_long_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
             and p["match_id"] not in medium_short_ids
         ]
-        medium_long = _build_ticket_optimized(
+                medium_long = _build_ticket_optimized(
             medium_long_pool,
             target_cote=20.0,
             min_n=4, max_n=7,
@@ -2833,10 +2788,9 @@ async def get_tickets(day: str):
             max_per_group=3,
             max_per_league=3,
             max_cote=30.0,
-        )
+        ) or []
         medium_long_ids = {p["match_id"] for p in medium_long}
-        # === RISKY (TOUS les picks restants, fallback inclus) ===
-                # === RISKY ===
+# === RISKY (TOUS les picks restants, fallback inclus) ===
         risky_pool = [
             p for p in all_picks
             if p["match_id"] not in safe_ids
@@ -2857,7 +2811,7 @@ async def get_tickets(day: str):
                 max_per_league=4,
                 min_cote=50.0,
                 max_cote=150.0,
-            )
+            ) or []
         else:
             risky = []        
         match_map = {dict(r)["id"]: dict(r) for r in rows}
