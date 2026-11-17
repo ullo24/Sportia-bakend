@@ -185,7 +185,9 @@ scheduler = AsyncIOScheduler()
 async def lifespan(app: FastAPI):
     init_db()
     scheduler.add_job(daily_pipeline, "cron", hour=6, minute=0)
+    scheduler.add_job(flag_scheduled_fallbacks_job, "cron", hour=6, minute=15)
     scheduler.add_job(daily_pipeline, "cron", hour=12, minute=0)
+    scheduler.add_job(flag_scheduled_fallbacks_job, "cron", hour=12, minute=15)
     scheduler.start()
     asyncio.create_task(daily_pipeline())
     yield
@@ -4150,6 +4152,13 @@ async def run_flag_scheduled_fallbacks():
 
     print(f"=== {updated} matchs SCHEDULED marqués ===")
 
+async def flag_scheduled_fallbacks_job():
+    """Wrapper pour le scheduler. S'exécute après chaque daily_pipeline."""
+    try:
+        print("=== Marquage automatique des fallbacks SCHEDULED ===")
+        await run_flag_scheduled_fallbacks()
+    except Exception as e:
+        print(f"Erreur flag_scheduled_fallbacks_job: {e}")
 
 async def run_repredict_history(limit: int = 0):
     global _REPREDICT_STATUS
