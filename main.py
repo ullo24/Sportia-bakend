@@ -2767,6 +2767,7 @@ async def get_tickets(day: str):
             max_per_market=1,
             max_per_group=2,
             max_per_league=2,
+            min_cote=5.0,
             max_cote=12.0,
         ) or []
         medium_short_ids = {p["match_id"] for p in medium_short}
