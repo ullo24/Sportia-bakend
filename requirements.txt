@@ -5,3 +5,4 @@ python-dotenv
 apscheduler
 numpy
 psycopg2-binary
+sports-skills
