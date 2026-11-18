@@ -4308,6 +4308,13 @@ def tickets_backtest(days: int = 30):
         "daily_breakdown": day_details,
     }
 # ===== RE-PRÉDICTION HISTORIQUE (AS-OF) =====
+# ===== STATUT IMPORT XG BZZOIRO (niveau module, obligatoire) =====
+_BZZOIRO_STATUS = {
+    "running": False, "done": 0, "total": 0,
+    "updated": 0, "not_found": 0, "errors": 0,
+    "started_at": None, "finished_at": None,
+}
+
 _REPREDICT_STATUS = {"running": False, "done": 0, "total": 0, "errors": 0, "started_at": None}
 
 
@@ -4481,8 +4488,7 @@ async def run_repredict_history(limit: int = 0):
         "running": True, "done": 0, "total": 0, "errors": 0,
         "started_at": datetime.now().isoformat(),
     }
-    _BZZOIRO_STATUS = {"running": False, "done": 0, "total": 0, "updated": 0, "not_found": 0, "errors": 0}
-
+    
     conn = db()
     c = conn.cursor()
     q = ("SELECT id, league, home, away, kickoff FROM matches "
