@@ -1350,6 +1350,86 @@ async def fetch_bzzoiro_xg(event_id: int):
         print(f"Exception Bzzoiro stats {event_id}: {e}")
         return None, None
 
+# ===== BZZOIRO XG IMPORT =====
+BZZOIRO_API_KEY = os.getenv("BZZOIRO_API_KEY")
+BZZOIRO_BASE_URL = "https://sports.bzzoiro.com/api/v2"
+
+
+def _normalize_team(name: str) -> str:
+    """Normalise un nom d'équipe (retire préfixes, suffixes, accents)."""
+    n = name.lower().strip()
+    for a, b in [("é","e"),("è","e"),("ê","e"),("à","a"),("â","a"),
+                 ("ô","o"),("û","u"),("ç","c"),("ã","a"),("õ","o"),("ñ","n")]:
+        n = n.replace(a, b)
+    # Préfixes
+    for prefix in ["fc ", "ac ", "as ", "sc ", "cf ", "rc ", "cd ", "ca ",
+                   "club ", "deportivo ", "sporting ", "afc ", "ssc ", "ss ", "us "]:
+        if n.startswith(prefix):
+            n = n[len(prefix):]
+    # Suffixes (EC, FC, SC, etc. à la fin)
+    for suffix in [" fc", " ac", " sc", " cf", " rc", " cd", " ca",
+                   " ec", " se", " afc", " ssc", " ss", " mg", " sp"]:
+        if n.endswith(suffix):
+            n = n[:-len(suffix)]
+    return n.replace(" ", "").replace("-", "").replace(".", "").strip()
+
+
+async def find_bzzoiro_event_id(home_team: str, away_team: str, match_date: str):
+    """Cherche l'event_id Bzzoiro d'un match par date + matching des noms."""
+    if not BZZOIRO_API_KEY:
+        return None
+
+    headers = {"Authorization": f"Token {BZZOIRO_API_KEY}"}
+    home_norm = _normalize_team(home_team)
+    away_norm = _normalize_team(away_team)
+
+    # Cherche tous les matchs de la journée (limite 100)
+    params = {"date_from": match_date, "date_to": match_date, "limit": 100}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"{BZZOIRO_BASE_URL}/events/", headers=headers, params=params)
+            if r.status_code != 200:
+                print(f"Bzzoiro search {match_date}: HTTP {r.status_code}")
+                return None
+
+            results = r.json().get("results", [])
+            for ev in results:
+                ev_home = _normalize_team(ev.get("home_team", ""))
+                ev_away = _normalize_team(ev.get("away_team", ""))
+                if ev_home == home_norm and ev_away == away_norm:
+                    return ev.get("id")
+                if ev_home == away_norm and ev_away == home_norm:
+                    return ev.get("id")  # home/away inversés
+            return None
+    except Exception as e:
+        print(f"Exception Bzzoiro search {home_team}-{away_team}: {e}")
+        return None
+
+
+async def fetch_bzzoiro_xg(event_id: int):
+    """Récupère les xG réels via /stats/."""
+    if not BZZOIRO_API_KEY:
+        return None, None
+
+    headers = {"Authorization": f"Token {BZZOIRO_API_KEY}"}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{BZZOIRO_BASE_URL}/events/{event_id}/stats/",
+                headers=headers
+            )
+            if r.status_code != 200:
+                return None, None
+            data = r.json()
+            stats = data.get("stats", {}) or {}
+            home_xg = (stats.get("home") or {}).get("xg", {}).get("actual")
+            away_xg = (stats.get("away") or {}).get("xg", {}).get("actual")
+            return home_xg, away_xg
+    except Exception as e:
+        print(f"Exception Bzzoiro stats {event_id}: {e}")
+        return None, None
+
 async def daily_pipeline():
     global _PIPELINE_RUNNING
     if _PIPELINE_RUNNING:
@@ -4402,6 +4482,69 @@ async def run_repredict_history(limit: int = 0):
     _REPREDICT_STATUS["running"] = False
     _REPREDICT_STATUS["finished_at"] = datetime.now().isoformat()
     print(f"=== Re-prédiction terminée : {_REPREDICT_STATUS['done']} OK, {_REPREDICT_STATUS['errors']} erreurs ===")
+
+@app.post("/admin/import-bzzoiro-xg")
+async def import_bzzoiro_xg(background_tasks: BackgroundTasks, limit: int = 200):
+    background_tasks.add_task(run_import_bzzoiro_xg, limit)
+    return {"status": "started", "message": f"Import xG Bzzoiro pour {limit} matchs"}
+
+
+async def run_import_bzzoiro_xg(limit: int = 200):
+    conn = db(); c = conn.cursor()
+    c.execute("""
+        SELECT id, home, away, kickoff, league
+        FROM matches
+        WHERE status = 'FINISHED'
+          AND home_goals IS NOT NULL
+          AND xg_home_real IS NULL
+        ORDER BY kickoff DESC
+        LIMIT %s
+    """, (limit,))
+    rows = c.fetchall()
+    c.close(); conn.close()
+
+    if not rows:
+        print("=== Aucun match à enrichir avec xG Bzzoiro ===")
+        return
+
+    print(f"=== Import xG Bzzoiro pour {len(rows)} matchs ===")
+    updated = 0
+    not_found = 0
+
+    for idx, r in enumerate(rows):
+        try:
+            match_date = r["kickoff"][:10]  # YYYY-MM-DD
+            event_id = await find_bzzoiro_event_id(r["home"], r["away"], match_date)
+            if not event_id:
+                not_found += 1
+                await asyncio.sleep(0.2)
+                continue
+
+            home_xg, away_xg = await fetch_bzzoiro_xg(event_id)
+            if home_xg is None or away_xg is None:
+                not_found += 1
+                await asyncio.sleep(0.2)
+                continue
+
+            conn = db(); c = conn.cursor()
+            c.execute(
+                "UPDATE matches SET xg_home_real = %s, xg_away_real = %s, "
+                "source_primary = 'bzzoiro' WHERE id = %s",
+                (round(float(home_xg), 3), round(float(away_xg), 3), r["id"])
+            )
+            conn.commit(); c.close(); conn.close()
+
+            updated += 1
+            if (idx + 1) % 20 == 0:
+                print(f"  {idx + 1}/{len(rows)} ({updated} OK, {not_found} non trouvés)")
+
+            await asyncio.sleep(0.2)  # rate-limit
+
+        except Exception as e:
+            print(f"Erreur match {r.get('id')}: {e}")
+            await asyncio.sleep(0.2)
+
+    print(f"=== Import terminé : {updated} xG récupérés, {not_found} non trouvés ===")
     
 @app.get("/debug/fc-leagues")
 async def debug_fc_leagues():
