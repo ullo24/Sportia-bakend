@@ -119,6 +119,19 @@ ODDS_SPORT_KEYS = {
     "Major League Soccer": "soccer_usa_mls",
 }
 
+# ===== BIGBALLSDATA CONFIG =====
+BBS_API_KEY = os.getenv("BBS_API_KEY")
+BBS_BASE_URL = "https://api.bigballsdata.com"
+
+BBS_LEAGUES = {
+    "Premier League": "epl",
+    "La Liga": "laliga",
+    "Serie A": "seriea",
+    "Bundesliga": "bundesliga",
+    "Ligue 1": "ligue1",
+    "Champions League": "ucl",
+}
+
 COMPETITIONS = {
     "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
     "BL1": "Bundesliga", "FL1": "Ligue 1", "DED": "Eredivisie",
@@ -1220,7 +1233,34 @@ def convert_zafronix_to_internal(events: list, league_code: str, league_name: st
             print(f"Erreur conversion Zafronix {ev.get('id')}: {e}")
     return converted
 
-
+async def fetch_bbs_matches(league_code: str, date_from: str, date_to: str):
+    if not BBS_API_KEY:
+        return []
+    cache_key = f"bbs:matches:{league_code}:{date_from}:{date_to}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+    url = f"{BBS_BASE_URL}/v1/matches"
+    headers = {"Authorization": f"Bearer {BBS_API_KEY}"}
+    params = {
+        "sport": "football", "league": league_code,
+        "date_from": date_from, "date_to": date_to,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url, headers=headers, params=params)
+            if r.status_code != 200:
+                print(f"BBS {league_code}: HTTP {r.status_code}")
+                return []
+            data = r.json()
+            matches = data.get("data", [])
+            if matches:
+                cache_set(cache_key, matches, ttl_hours=6)
+            return matches
+    except Exception as e:
+        print(f"Exception BBS {league_code}: {e}")
+        return []
+            
 async def daily_pipeline():
     global _PIPELINE_RUNNING
     if _PIPELINE_RUNNING:
