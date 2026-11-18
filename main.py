@@ -123,6 +123,7 @@ ODDS_SPORT_KEYS = {
 BZZOIRO_API_KEY = os.getenv("BZZOIRO_API_KEY")
 BZZOIRO_BASE_URL = "https://sports.bzzoiro.com/api/v2"
 
+
 # ===== BIGBALLSDATA CONFIG =====
 BBS_API_KEY = os.getenv("BBS_API_KEY")
 BBS_BASE_URL = "https://api.bigballsdata.com"
@@ -4584,8 +4585,10 @@ async def import_bzzoiro_xg(background_tasks: BackgroundTasks, limit: int = 200)
 
 @app.get("/admin/bzzoiro-status")
 def bzzoiro_status():
-    return _BZZOIRO_STATUS
-
+    st = globals().get("_BZZOIRO_STATUS")
+    if st is None:
+        return {"ok": False, "error": "_BZZOIRO_STATUS non initialisé"}
+    return {"ok": True, "status": st}
 
 async def run_import_bzzoiro_xg(limit: int = 200):
     conn = db(); c = conn.cursor()
