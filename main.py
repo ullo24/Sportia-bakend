@@ -1270,19 +1270,70 @@ async def fetch_bbs_matches(league_code: str, date_from: str, date_to: str):
         return []
 
 # ===== BZZOIRO XG IMPORT =====
+_TEAM_ALIASES = {}  # Vide pour l'instant, le fuzzy matching fait le travail
 
 def _normalize_team(name: str) -> str:
-    """Normalise un nom d'équipe pour le matching Bzzoiro."""
-    n = name.lower()
+    """Normalise un nom d'équipe (retire préfixes, suffixes, accents)."""
+    if not name:
+        return ""
+    n = name.lower().strip()
+    
+    # Accents
+    for a, b in [("é","e"),("è","e"),("ê","e"),("à","a"),("â","a"),
+                 ("ô","o"),("û","u"),("ç","c"),("ã","a"),("õ","o"),("ñ","n"),
+                 ("ü","u"),("ö","o"),("ä","a")]:
+        n = n.replace(a, b)
+    
+    # Préfixes
     for prefix in ["fc ", "ac ", "as ", "sc ", "cf ", "rc ", "cd ", "ca ",
-                   "club ", "deportivo ", "real ", "sporting ", "afc ", "ssc "]:
+                   "club ", "deportivo ", "sporting ", "afc ", "ssc ", "ss ", "us ",
+                   "clube ", "societade ", "societa ", "futebolclube "]:
         if n.startswith(prefix):
             n = n[len(prefix):]
-    # Retirer les accents et caractères spéciaux basiques
-    for a, b in [("é","e"),("è","e"),("ê","e"),("à","a"),("â","a"),("ô","o"),("û","u"),("ç","c")]:
-        n = n.replace(a, b)
-    return n.replace(" ", "").replace("-", "").replace(".", "").strip()
+    
+    # Suffixes
+    for suffix in [" fc", " ac", " sc", " cf", " rc", " cd", " ca",
+                   " ec", " se", " afc", " ssc", " ss", " mg", " sp",
+                   " fbc", " scf", " saf", " safp"]:
+        if n.endswith(suffix):
+            n = n[:-len(suffix)]
+    
+    return n.replace(" ", "").replace("-", "").replace(".", "").replace("&", "").strip()
 
+import difflib
+
+def _fuzzy_match(name1: str, name2: str) -> float:
+    """Retourne un score de similarité (0-1) entre 2 noms normalisés."""
+    return difflib.SequenceMatcher(None, name1, name2).ratio()
+
+
+def _best_match(target_home: str, target_away: str, events: list, threshold: float = 0.75):
+    """
+    Cherche le meilleur match Bzzoiro pour (home, away) parmi une liste d'events.
+    Retourne l'event_id si score >= threshold, sinon None.
+    """
+    home_norm = _normalize_team(target_home)
+    away_norm = _normalize_team(target_away)
+
+    best_score = 0.0
+    best_event_id = None
+
+    for ev in events:
+        ev_home = _normalize_team(ev.get("home_team", ""))
+        ev_away = _normalize_team(ev.get("away_team", ""))
+
+        # Score direct (home=home, away=away) et inverse (home=away, away=home)
+        score_direct = (_fuzzy_match(home_norm, ev_home) + _fuzzy_match(away_norm, ev_away)) / 2
+        score_inverse = (_fuzzy_match(home_norm, ev_away) + _fuzzy_match(away_norm, ev_home)) / 2
+
+        score = max(score_direct, score_inverse)
+        if score > best_score:
+            best_score = score
+            best_event_id = ev.get("id")
+
+    if best_score >= threshold:
+        return best_event_id
+    return None
 
 async def find_bzzoiro_event_id(home_team: str, away_team: str, match_date: str):
     """
@@ -4275,57 +4326,99 @@ async def import_bzzoiro_xg(background_tasks: BackgroundTasks, limit: int = 200)
 
 
 async def run_import_bzzoiro_xg(limit: int = 200):
-    conn = db(); c = conn.cursor()
-    c.execute("""
-        SELECT id, home, away, kickoff, league
-        FROM matches
-        WHERE status = 'FINISHED'
-          AND home_goals IS NOT NULL
-          AND (xg_home_real IS NULL OR xg_away_real IS NULL)
-        ORDER BY kickoff DESC
-        LIMIT %s
-    """, (limit,))
-    rows = c.fetchall()
-    c.close(); conn.close()
+    global _BZZOIRO_STATUS
+    _BZZOIRO_STATUS = {"running": True, "done": 0, "total": 0, "updated": 0, "not_found": 0, "errors": 0}
 
-    if not rows:
-        print("=== Aucun match à enrichir avec xG Bzzoiro ===")
-        return
+    try:
+        # 1. Récupère les matchs sans xG
+        conn = db(); c = conn.cursor()
+        c.execute("""
+            SELECT id, home, away, kickoff, league,
+                   SUBSTRING(kickoff, 1, 10) as match_date
+            FROM matches
+            WHERE status = 'FINISHED'
+              AND home_goals IS NOT NULL
+              AND xg_home_real IS NULL
+            ORDER BY kickoff DESC
+            LIMIT %s
+        """, (limit,))
+        rows = c.fetchall()
+        c.close(); conn.close()
 
-    print(f"=== Import xG Bzzoiro pour {len(rows)} matchs ===")
-    updated = 0
-    not_found = 0
+        _BZZOIRO_STATUS["total"] = len(rows)
+        print(f"=== Import xG Bzzoiro pour {len(rows)} matchs ===")
 
-    for idx, r in enumerate(rows):
-        try:
-            match_date = r["kickoff"][:10]  # YYYY-MM-DD
-            event_id = await find_bzzoiro_event_id(r["home"], r["away"], match_date)
-            if not event_id:
-                not_found += 1
-                continue
+        if not rows:
+            return
 
-            home_xg, away_xg = await fetch_bzzoiro_xg(event_id)
-            if home_xg is None or away_xg is None:
-                continue
+        # 2. Groupe par date
+        from collections import defaultdict
+        by_date = defaultdict(list)
+        for r in rows:
+            by_date[r["match_date"]].append(r)
 
-            conn = db(); c = conn.cursor()
-            c.execute(
-                "UPDATE matches SET xg_home_real = %s, xg_away_real = %s WHERE id = %s",
-                (round(home_xg, 3), round(away_xg, 3), r["id"])
-            )
-            conn.commit(); c.close(); conn.close()
+        print(f"   {len(by_date)} dates distinctes à traiter")
 
-            updated += 1
-            if (idx + 1) % 20 == 0:
-                print(f"  {idx + 1}/{len(rows)} traités ({updated} mis à jour, {not_found} non trouvés)")
+        headers = {"Authorization": f"Token {BZZOIRO_API_KEY}"}
 
-            await asyncio.sleep(0.2)  # Respecter le rate-limit
+        # 3. Pour chaque date : 1 seule requête Bzzoiro
+        async with httpx.AsyncClient(timeout=20) as client:
+            for date_str, date_rows in sorted(by_date.items(), reverse=True):
+                try:
+                    r = await client.get(
+                        f"{BZZOIRO_BASE_URL}/events/",
+                        headers=headers,
+                        params={"date_from": date_str, "date_to": date_str, "limit": 200}
+                    )
+                    if r.status_code != 200:
+                        print(f"   {date_str}: HTTP {r.status_code}")
+                        _BZZOIRO_STATUS["done"] += len(date_rows)
+                        continue
 
-        except Exception as e:
-            print(f"Erreur match {r.get('id')}: {e}")
+                    events = r.json().get("results", [])
+                    print(f"   {date_str}: {len(events)} events Bzzoiro, {len(date_rows)} matchs à matcher")
 
-    print(f"=== Import terminé : {updated} xG récupérés, {not_found} non trouvés ===")
+                    # 4. Fuzzy match pour chaque match de cette date
+                    for row in date_rows:
+                        event_id = _best_match(row["home"], row["away"], events, threshold=0.75)
+                        if not event_id:
+                            _BZZOIRO_STATUS["not_found"] += 1
+                            _BZZOIRO_STATUS["done"] += 1
+                            continue
 
+                        home_xg, away_xg = await fetch_bzzoiro_xg(event_id)
+                        if home_xg is None or away_xg is None:
+                            _BZZOIRO_STATUS["not_found"] += 1
+                            _BZZOIRO_STATUS["done"] += 1
+                            continue
+
+                        conn = db(); c = conn.cursor()
+                        c.execute(
+                            "UPDATE matches SET xg_home_real = %s, xg_away_real = %s, source_primary = 'bzzoiro' WHERE id = %s",
+                            (round(float(home_xg), 3), round(float(away_xg), 3), row["id"])
+                        )
+                        conn.commit(); c.close(); conn.close()
+
+                        _BZZOIRO_STATUS["updated"] += 1
+                        _BZZOIRO_STATUS["done"] += 1
+                        await asyncio.sleep(0.1)
+
+                    print(f"   {date_str}: OK={_BZZOIRO_STATUS['updated']} not_found={_BZZOIRO_STATUS['not_found']}")
+                    await asyncio.sleep(0.3)
+
+                except Exception as e:
+                    print(f"   Erreur date {date_str}: {e}")
+                    _BZZOIRO_STATUS["errors"] += 1
+
+        print(f"=== Import terminé: OK={_BZZOIRO_STATUS['updated']} not_found={_BZZOIRO_STATUS['not_found']} errors={_BZZOIRO_STATUS['errors']} ===")
+
+    except Exception as e:
+        print(f"=== CRASH import Bzzoiro: {e} ===")
+        import traceback
+        traceback.print_exc()
+    finally:
+        _BZZOIRO_STATUS["running"] = False
+        
 @app.post("/admin/fetch-odds")
 async def admin_fetch_odds(day: str = None):
     target = day or date.today().isoformat()
@@ -4387,6 +4480,7 @@ async def run_repredict_history(limit: int = 0):
         "running": True, "done": 0, "total": 0, "errors": 0,
         "started_at": datetime.now().isoformat(),
     }
+    _BZZOIRO_STATUS = {"running": False, "done": 0, "total": 0, "updated": 0, "not_found": 0, "errors": 0}
 
     conn = db()
     c = conn.cursor()
@@ -4487,6 +4581,10 @@ async def run_repredict_history(limit: int = 0):
 async def import_bzzoiro_xg(background_tasks: BackgroundTasks, limit: int = 200):
     background_tasks.add_task(run_import_bzzoiro_xg, limit)
     return {"status": "started", "message": f"Import xG Bzzoiro pour {limit} matchs"}
+
+@app.get("/admin/bzzoiro-status")
+def bzzoiro_status():
+    return _BZZOIRO_STATUS
 
 
 async def run_import_bzzoiro_xg(limit: int = 200):
