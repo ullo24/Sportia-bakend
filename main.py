@@ -4517,62 +4517,96 @@ def bzzoiro_status():
     return {"ok": True, "status": st}
 
 async def run_import_bzzoiro_xg(limit: int = 200):
-    conn = db(); c = conn.cursor()
-    c.execute("""
-        SELECT id, home, away, kickoff, league
-        FROM matches
-        WHERE status = 'FINISHED'
-          AND home_goals IS NOT NULL
-          AND xg_home_real IS NULL
-        ORDER BY kickoff DESC
-        LIMIT %s
-    """, (limit,))
-    rows = c.fetchall()
-    c.close(); conn.close()
+    global _BZZOIRO_STATUS
+    _BZZOIRO_STATUS = {"running": True, "done": 0, "total": 0, "updated": 0, "not_found": 0, "errors": 0}
 
-    if not rows:
-        print("=== Aucun match à enrichir avec xG Bzzoiro ===")
-        return
+    try:
+        conn = db(); c = conn.cursor()
+        c.execute("""
+            SELECT id, home, away, kickoff, league,
+                   SUBSTRING(kickoff, 1, 10) as match_date
+            FROM matches
+            WHERE status = 'FINISHED'
+              AND home_goals IS NOT NULL
+              AND xg_home_real IS NULL
+            ORDER BY kickoff DESC
+            LIMIT %s
+        """, (limit,))
+        rows = c.fetchall()
+        c.close(); conn.close()
 
-    print(f"=== Import xG Bzzoiro pour {len(rows)} matchs ===")
-    updated = 0
-    not_found = 0
+        _BZZOIRO_STATUS["total"] = len(rows)
+        print(f"=== Import xG Bzzoiro pour {len(rows)} matchs ===")
 
-    for idx, r in enumerate(rows):
-        try:
-            match_date = r["kickoff"][:10]  # YYYY-MM-DD
-            event_id = await find_bzzoiro_event_id(r["home"], r["away"], match_date)
-            if not event_id:
-                not_found += 1
-                await asyncio.sleep(0.2)
-                continue
+        if not rows:
+            print("=== Aucun match à enrichir ===")
+            return
 
-            home_xg, away_xg = await fetch_bzzoiro_xg(event_id)
-            if home_xg is None or away_xg is None:
-                not_found += 1
-                await asyncio.sleep(0.2)
-                continue
+        from collections import defaultdict
+        by_date = defaultdict(list)
+        for r in rows:
+            by_date[r["match_date"]].append(r)
 
-            conn = db(); c = conn.cursor()
-            c.execute(
-                "UPDATE matches SET xg_home_real = %s, xg_away_real = %s, "
-                "source_primary = 'bzzoiro' WHERE id = %s",
-                (round(float(home_xg), 3), round(float(away_xg), 3), r["id"])
-            )
-            conn.commit(); c.close(); conn.close()
+        print(f"   {len(by_date)} dates distinctes à traiter")
 
-            updated += 1
-            if (idx + 1) % 20 == 0:
-                print(f"  {idx + 1}/{len(rows)} ({updated} OK, {not_found} non trouvés)")
+        headers = {"Authorization": f"Token {BZZOIRO_API_KEY}"}
 
-            await asyncio.sleep(0.2)  # rate-limit
+        async with httpx.AsyncClient(timeout=20) as client:
+            for date_str, date_rows in sorted(by_date.items(), reverse=True):
+                try:
+                    r = await client.get(
+                        f"{BZZOIRO_BASE_URL}/events/",
+                        headers=headers,
+                        params={"date_from": date_str, "date_to": date_str, "limit": 200}
+                    )
+                    if r.status_code != 200:
+                        print(f"   {date_str}: HTTP {r.status_code}")
+                        _BZZOIRO_STATUS["done"] += len(date_rows)
+                        continue
 
-        except Exception as e:
-            print(f"Erreur match {r.get('id')}: {e}")
-            await asyncio.sleep(0.2)
+                    events = r.json().get("results", [])
+                    print(f"   {date_str}: {len(events)} events Bzzoiro, {len(date_rows)} matchs à matcher")
 
-    print(f"=== Import terminé : {updated} xG récupérés, {not_found} non trouvés ===")
-    
+                    for row in date_rows:
+                        event_id = _best_match(row["home"], row["away"], events, threshold=0.75)
+                        if not event_id:
+                            _BZZOIRO_STATUS["not_found"] += 1
+                            _BZZOIRO_STATUS["done"] += 1
+                            continue
+
+                        home_xg, away_xg = await fetch_bzzoiro_xg(event_id)
+                        if home_xg is None or away_xg is None:
+                            _BZZOIRO_STATUS["not_found"] += 1
+                            _BZZOIRO_STATUS["done"] += 1
+                            continue
+
+                        conn = db(); c = conn.cursor()
+                        c.execute(
+                            "UPDATE matches SET xg_home_real = %s, xg_away_real = %s, source_primary = 'bzzoiro' WHERE id = %s",
+                            (round(float(home_xg), 3), round(float(away_xg), 3), row["id"])
+                        )
+                        conn.commit(); c.close(); conn.close()
+
+                        _BZZOIRO_STATUS["updated"] += 1
+                        _BZZOIRO_STATUS["done"] += 1
+                        await asyncio.sleep(0.1)
+
+                    print(f"   {date_str}: OK={_BZZOIRO_STATUS['updated']} not_found={_BZZOIRO_STATUS['not_found']}")
+                    await asyncio.sleep(0.3)
+
+                except Exception as e:
+                    print(f"   Erreur date {date_str}: {e}")
+                    _BZZOIRO_STATUS["errors"] += 1
+
+        print(f"=== Import terminé: OK={_BZZOIRO_STATUS['updated']} not_found={_BZZOIRO_STATUS['not_found']} errors={_BZZOIRO_STATUS['errors']} ===")
+
+    except Exception as e:
+        print(f"=== CRASH import Bzzoiro: {e} ===")
+        import traceback
+        traceback.print_exc()
+    finally:
+        _BZZOIRO_STATUS["running"] = False
+        
 @app.get("/debug/fc-leagues")
 async def debug_fc_leagues():
     headers = {"Authorization": f"Bearer {FC_API_KEY}"}
