@@ -4,7 +4,12 @@ workflows:
     instance_type: mac_mini_m2
     max_build_duration: 120
     environment:
-      flutter: stable
+      flutter: 3.44.0        # ← figé, plus de surprise
+      java: 17
+    cache:
+      cache_paths:
+        - $FLUTTER_ROOT/.pub-cache
+        - $HOME/.gradle/caches
     scripts:
       - name: Get Flutter packages
         script: flutter pub get
@@ -12,14 +17,24 @@ workflows:
         script: flutter build apk --release
     artifacts:
       - build/app/outputs/flutter-apk/*.apk
+    publishing:
+      email:
+        recipients:
+          - ton-email@exemple.com
+        notify:
+          success: true
+          failure: true
 
-  # 👇 NOUVEAU WORKFLOW POUR LE WEB 👇
   web-workflow:
     name: SportIA Predict - Web
     instance_type: mac_mini_m2
     max_build_duration: 60
     environment:
-      flutter: stable
+      flutter: 3.44.0
+      java: 17
+    cache:
+      cache_paths:
+        - $FLUTTER_ROOT/.pub-cache
     scripts:
       - name: Get Flutter packages
         script: flutter pub get
@@ -28,10 +43,9 @@ workflows:
     artifacts:
       - build/web/**
     publishing:
-      # Optionnel : publication automatique (voir Étape 3)
       email:
         recipients:
-          - votre-email@exemple.com # Remplacez par votre email
+          - ton-email@exemple.com
         notify:
           success: true
           failure: true
