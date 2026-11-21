@@ -493,7 +493,8 @@ def compute_stats_from_history(team_name: str, n_matches: int = 40, before_date:
     
     if before_date:
         c.execute("""
-            SELECT home, away, home_goals, away_goals, kickoff 
+            SELECT home, away, home_goals, away_goals, kickoff,
+                   xg_home_real, xg_away_real
             FROM matches 
             WHERE (home = %s OR away = %s) AND status = 'FINISHED'
             AND home_goals IS NOT NULL 
@@ -503,14 +504,14 @@ def compute_stats_from_history(team_name: str, n_matches: int = 40, before_date:
         """, (team_name, team_name, before_date, n_matches))
     else:
         c.execute("""
-            SELECT home, away, home_goals, away_goals, kickoff 
+            SELECT home, away, home_goals, away_goals, kickoff,
+                   xg_home_real, xg_away_real
             FROM matches 
             WHERE (home = %s OR away = %s) AND status = 'FINISHED'
             AND home_goals IS NOT NULL 
             AND away_goals IS NOT NULL
             ORDER BY kickoff DESC LIMIT %s
-        """, (team_name, team_name, n_matches))
-    
+        """, (team_name, team_name, n_matches))    
     rows = c.fetchall()
     c.close()
     conn.close()
@@ -557,9 +558,21 @@ def compute_stats_from_history(team_name: str, n_matches: int = 40, before_date:
         else:
             stats["weight_sum_away"] += weight
 
-        team_gf = r["home_goals"] if is_home else r["away_goals"]
-        team_ga = r["away_goals"] if is_home else r["home_goals"]
-        
+                # Utiliser xG réel en priorité (Bzzoiro), sinon les buts
+        if is_home:
+            if r["xg_home_real"] is not None and r["xg_away_real"] is not None:
+                team_gf = r["xg_home_real"]
+                team_ga = r["xg_away_real"]
+            else:
+                team_gf = r["home_goals"]
+                team_ga = r["away_goals"]
+        else:
+            if r["xg_away_real"] is not None and r["xg_home_real"] is not None:
+                team_gf = r["xg_away_real"]
+                team_ga = r["xg_home_real"]
+            else:
+                team_gf = r["away_goals"]
+                team_ga = r["home_goals"]        
         # On pondère les buts
         stats["weighted_gf"] += team_gf * weight
         stats["weighted_ga"] += team_ga * weight
