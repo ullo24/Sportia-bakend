@@ -6,6 +6,31 @@ import '../user_service.dart';
 import '../widgets/team_logo.dart';
 import 'match_detail_screen.dart';
 
+class _SafeBadge extends StatelessWidget {
+  final Color color;
+  final String label;
+  const _SafeBadge({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+}
+
 class TicketsScreen extends StatefulWidget {
   const TicketsScreen({super.key});
 
@@ -1106,22 +1131,22 @@ class _TicketsScreenState extends State<TicketsScreen> {
     );
   }
   Widget buildSafeBadge(String quality) {
-    switch (quality) {
-      case 'premium':
-        return Badge(color: Colors.green, label: 'Safe ★');
-      case 'standard':
-        return Badge(color: Colors.blue, label: 'Safe');
-      case 'light':
-        return Badge(color: Colors.orange, label: 'Safe ↓');
-      case 'minimal':
-        return Badge(color: Colors.red, label: 'Safe !');
-      case 'single':
-        return Badge(color: Colors.grey, label: 'Pari simple');
-      case 'none':
-        return Text('Pas de safe aujourd\'hui');
-      default:
-        return Badge(color: Colors.green, label: 'Safe');
-    }
+  switch (quality) {
+    case 'premium':
+      return const _SafeBadge(color: Colors.green, label: 'Safe ★');
+    case 'standard':
+      return const _SafeBadge(color: Colors.blue, label: 'Safe');
+    case 'light':
+      return const _SafeBadge(color: Colors.orange, label: 'Safe ↓');
+    case 'minimal':
+      return const _SafeBadge(color: Colors.red, label: 'Safe !');
+    case 'single':
+      return const _SafeBadge(color: Colors.grey, label: 'Pari simple');
+    case 'none':
+      return const Text('Pas de safe aujourd\'hui');
+    default:
+      return const _SafeBadge(color: Colors.green, label: 'Safe');
   }
+}
   
 }
