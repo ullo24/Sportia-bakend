@@ -2265,12 +2265,16 @@ def _effective_proba(p):
         proba *= 0.80
     return proba
     
-def _build_safe_ticket(all_picks, min_cote=2.00, max_cote=2.50):
+def _build_safe_ticket(all_picks, min_cote=2.00, max_cote=2.50,
+                       min_pick_cote=1.30, min_proba_levels=None):
     """
-    Safe ticket : maximise la joint_prob sur toutes compétitions.
-    Pénalise les fallbacks de 20% pour les utiliser en dernier recours.
+    Safe ticket avec niveaux de proba paramétrables.
+    min_proba_levels : liste de seuils à essayer (default: [0.72, 0.68, 0.65, 0.62])
     """
     from itertools import combinations
+
+    if min_proba_levels is None:
+        min_proba_levels = [0.72, 0.68, 0.65, 0.62]    from itertools import combinations
 
     def _eff(p):
         proba = p.get("proba", 0)
@@ -2279,17 +2283,17 @@ def _build_safe_ticket(all_picks, min_cote=2.00, max_cote=2.50):
         return proba
 
     candidates = []
-    for min_proba_safe in [0.72, 0.68, 0.65, 0.62]:
+    for min_proba_safe in min_proba_levels:
         temp = [
             p for p in all_picks
             if p["market"] in _SAFE_MARKETS
             and _eff(p) >= min_proba_safe
-            and 1.30 <= p["cote"] <= 2.10
+            and min_pick_cote <= p["cote"] <= 2.10
         ]
         for p in all_picks:
             if (p["market"] in ("1", "2")
                 and _eff(p) >= min_proba_safe + 0.06
-                and 1.30 <= p["cote"] <= 2.10):
+                and min_pick_cote <= p["cote"] <= 2.10):
                 temp.append(p)
         if len(temp) >= 4:
             candidates = temp
@@ -2345,7 +2349,43 @@ def _build_safe_ticket(all_picks, min_cote=2.00, max_cote=2.50):
         if len(top2) == 2:
             return top2
     return best_combo or []
+
+
+
+def _build_safe_ticket_cascade(all_picks):
+    """
+    Construit un safe en cascade. Retourne (picks, quality_label).
+    Qualité : premium > standard > light > minimal > single > none
+    """
+    levels = [
+        # (min_cote, max_cote, min_pick_cote, min_proba_levels, label)
+        (2.00, 2.50, 1.30, [0.72, 0.68, 0.65, 0.62], "premium"),
+        (1.85, 2.60, 1.20, [0.68, 0.64, 0.60, 0.56], "standard"),
+        (1.70, 2.80, 1.15, [0.62, 0.58, 0.54, 0.50], "light"),
+        (1.50, 3.00, 1.10, [0.58, 0.54, 0.50, 0.46], "minimal"),
+    ]
     
+    for min_cote, max_cote, min_pick_cote, proba_levels, label in levels:
+        picks = _build_safe_ticket(
+            all_picks,
+            min_cote=min_cote,
+            max_cote=max_cote,
+            min_pick_cote=min_pick_cote,
+            min_proba_levels=proba_levels,
+        )
+        if picks and len(picks) >= 2:
+            return picks, label
+    
+    # Fallback ultime : single best pick (1 seul pick)
+    if all_picks:
+        safe_market_picks = [p for p in all_picks if p["market"] in _SAFE_MARKETS]
+        if not safe_market_picks:
+            safe_market_picks = all_picks  # accepter n'importe quel marché
+        best = max(safe_market_picks, key=lambda p: _effective_proba(p))
+        if _effective_proba(best) >= 0.55:
+            return [best], "single"
+    
+    return [], "none"    
 def _build_value_safe_ticket(all_picks, min_value=1.03, min_n=2, max_n=4, max_cote=4.00):
     """
     Construit un safe basé UNIQUEMENT sur des value bets réels.
@@ -2948,10 +2988,10 @@ async def get_tickets(day: str):
                 # 👈 Petite fonction utilitaire pour identifier la CL
         def is_cl(p):
             return p.get("league") == "Champions League"
-    # === SAFE (uniquement non-fallback) ===
-        safe = _build_safe_ticket(all_picks, min_cote=2.00, max_cote=2.50) or []
-        safe_ids = {p["match_id"] for p in safe} 
-    # === MEDIUM SHORT (uniquement non-fallback) ===
+# === SAFE (cascade) ===
+        safe, safe_quality = _build_safe_ticket_cascade(all_picks)
+        safe_ids = {p["match_id"] for p in safe}
+# === MEDIUM SHORT (uniquement non-fallback) ===
         medium_short_pool = [p for p in all_picks if p["match_id"] not in safe_ids]
         medium_short = _build_ticket_optimized(
             medium_short_pool,
@@ -3036,7 +3076,7 @@ async def get_tickets(day: str):
         risky = enrich(risky)
         return {
             "date": day,
-            "safe":         {"name": "Ticket Safe",         **_summarize_ticket(safe)},
+            "safe":         {"name": "Ticket Safe", "quality": safe_quality, **_summarize_ticket(safe)},
             "medium":       {"name": "Ticket Medium Short", **_summarize_ticket(medium_short)},
             "medium_short": {"name": "Ticket Medium Short", **_summarize_ticket(medium_short)},
             "medium_long":  {"name": "Ticket Medium Long",  **_summarize_ticket(medium_long)},
