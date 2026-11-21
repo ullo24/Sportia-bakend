@@ -1105,4 +1105,23 @@ class _TicketsScreenState extends State<TicketsScreen> {
       ),
     );
   }
+  Widget buildSafeBadge(String quality) {
+    switch (quality) {
+      case 'premium':
+        return Badge(color: Colors.green, label: 'Safe ★');
+      case 'standard':
+        return Badge(color: Colors.blue, label: 'Safe');
+      case 'light':
+        return Badge(color: Colors.orange, label: 'Safe ↓');
+      case 'minimal':
+        return Badge(color: Colors.red, label: 'Safe !');
+      case 'single':
+        return Badge(color: Colors.grey, label: 'Pari simple');
+      case 'none':
+        return Text('Pas de safe aujourd\'hui');
+      default:
+        return Badge(color: Colors.green, label: 'Safe');
+    }
+  }
+  
 }
