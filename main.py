@@ -2274,7 +2274,8 @@ def _build_safe_ticket(all_picks, min_cote=2.00, max_cote=2.50,
     from itertools import combinations
 
     if min_proba_levels is None:
-        min_proba_levels = [0.72, 0.68, 0.65, 0.62]    from itertools import combinations
+        min_proba_levels = [0.72, 0.68, 0.65, 0.62]
+        from itertools import combinations
 
     def _eff(p):
         proba = p.get("proba", 0)
