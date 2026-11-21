@@ -2116,11 +2116,13 @@ def _build_ticket_optimized(pool, target_cote, min_n, max_n,
 # ===== TICKET SAFE OPTIMISÉ (max joint prob) =====
 
 _SAFE_MARKETS = {
-    "1X", "12", "X2",         # Double chance
-    "DNB D", "DNB E",          # Draw no bet
-    "+0.5", "-4.5",            # Over/Under extrêmes
+    "BTTS",                    # Les 2 équipes marquent
+    "+1.5", "+2.5",            # Over 1.5 / 2.5 buts
+    "-3.5",                    # Under 3.5 buts
+    "1MT",                     # But en 1ère mi-temps
     "H+1 D", "H+1 E",          # Handicap +1
-    "Dom. marque", "Ext. marque",
+    "H-1 D", "H-1 E",          # Handicap -1
+    "1X", "12", "X2",          # Double chance
 }
 
 async def fetch_and_store_odds(day: str):
